@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pinbridge-mcp"
+version = "0.1.0"
+description = "Remote and local MCP server for PinBridge"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "PinBridge" }]
+dependencies = [
+  "httpx>=0.27.0,<1",
+  "mcp[cli]>=1.0.0,<2",
+  "pinbridge-sdk>=1.3.0",
+  "pydantic>=2.6.0,<3",
+  "pydantic-settings>=2.6.0,<3",
+  "uvicorn>=0.30.0,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0,<9",
+  "pytest-asyncio>=0.23.0,<1",
+  "ruff>=0.8.0,<1",
+]
+
+[project.scripts]
+pinbridge-mcp = "pinbridge_mcp.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pinbridge_mcp"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.uv.sources]
+pinbridge-sdk = { path = "../python-sdk", editable = true }
+
