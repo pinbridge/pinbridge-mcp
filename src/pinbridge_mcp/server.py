@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from .config import Settings, get_settings
 from .service import PinBridgeService
@@ -12,6 +13,11 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
     """Create and configure the FastMCP server."""
     settings = settings or get_settings()
     service = PinBridgeService(settings)
+
+    # Derive allowed hosts from public_base_url so the SDK host-header check passes
+    from urllib.parse import urlparse
+    parsed = urlparse(settings.normalized_public_base_url)
+    allowed_hosts = [parsed.netloc, "localhost", "127.0.0.1"]
 
     mcp = FastMCP(
         "PinBridge",
@@ -24,6 +30,10 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         streamable_http_path=settings.streamable_http_path,
         stateless_http=True,
         json_response=True,
+        transport_security=TransportSecuritySettings(
+            allowed_hosts=allowed_hosts,
+            allowed_origins=[settings.normalized_public_base_url],
+        ),
     )
 
     @mcp.tool()
