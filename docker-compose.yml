@@ -5,10 +5,11 @@ services:
     image: pinbridge-mcp:local
     container_name: pinbridge_mcp
     ports:
-      - "57289:57289"
+      - "127.0.0.1:57289:57289"
     environment:
       PINBRIDGE_MCP_HOST: 0.0.0.0
       PINBRIDGE_MCP_PORT: 57289
+      PINBRIDGE_MCP_PUBLIC_BASE_URL: ${PINBRIDGE_MCP_PUBLIC_BASE_URL:-https://mcp.pinbridge.io}
       PINBRIDGE_MCP_PINBRIDGE_BASE_URL: ${PINBRIDGE_MCP_PINBRIDGE_BASE_URL:-https://api.pinbridge.io}
       PINBRIDGE_MCP_PINBRIDGE_API_KEY: ${PINBRIDGE_MCP_PINBRIDGE_API_KEY:-}
       PINBRIDGE_MCP_VERIFY_INCOMING_API_KEYS: ${PINBRIDGE_MCP_VERIFY_INCOMING_API_KEYS:-true}
