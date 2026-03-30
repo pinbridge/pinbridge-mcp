@@ -15,13 +15,12 @@ RUN python -m venv "$POETRY_HOME" \
 
 WORKDIR /app
 
-COPY python-sdk /python-sdk
-COPY pinbridge-mcp/pyproject.toml pinbridge-mcp/README.md /app/
-COPY pinbridge-mcp/poetry.lock* /app/
+COPY pyproject.toml README.md /app/
+COPY poetry.lock* /app/
 
 RUN poetry install --no-root --only main
 
-COPY pinbridge-mcp/src /app/src
+COPY src /app/src
 
 RUN poetry install --only main
 

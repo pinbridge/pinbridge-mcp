@@ -1,8 +1,7 @@
 services:
   mcp:
     build:
-      context: ..
-      dockerfile: pinbridge-mcp/Dockerfile
+      context: .
     image: pinbridge-mcp:local
     container_name: pinbridge_mcp
     ports:

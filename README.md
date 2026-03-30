@@ -93,11 +93,12 @@ Notes:
 
 ## Docker
 
-Build the image from the workspace root so the local `python-sdk` path dependency is available:
+The Docker setup assumes you run commands from inside the `pinbridge-mcp` directory.
+The image installs `pinbridge-sdk` from PyPI, so it does not depend on a sibling `python-sdk` checkout in production.
 
 ```bash
 cd pinbridge-mcp
-docker build -f Dockerfile ..
+docker build -t pinbridge-mcp:local .
 ```
 
 Run only the MCP server against a remote or already-running PinBridge API:

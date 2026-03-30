@@ -15,6 +15,14 @@ class _FakeModel:
         return dict(self._payload)
 
 
+class _FakeResponse:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    def json(self) -> dict:
+        return dict(self._payload)
+
+
 class _FakePinterest:
     async def list_accounts(self) -> list[_FakeModel]:
         return [_FakeModel({"id": "acct_1", "username": "demo"})]
@@ -74,13 +82,19 @@ class _FakeClient:
     def __init__(self, *args, **kwargs) -> None:
         self.pinterest = _FakePinterest()
         self.pins = _FakePins()
-        self.activity_logs = _FakeActivityLogs()
         self.webhooks = _FakeWebhooks()
         self.billing = _FakeBilling()
         self.rate_meter = _FakeRateMeter()
 
     async def aclose(self) -> None:
         return None
+
+    async def request(self, method: str, path: str, *, params: dict | None = None) -> _FakeResponse:
+        if method == "GET" and path == "/v1/activity-logs":
+            return _FakeResponse(
+                {"items": [{"id": "log_1", **(params or {})}], "next_cursor": None}
+            )
+        raise AssertionError(f"Unexpected request: {method} {path}")
 
 
 def test_service_uses_bound_request_api_key() -> None:
@@ -111,5 +125,26 @@ def test_service_related_terms_normalizes_string_input() -> None:
         )
         assert response["related_term_count"] == 2
         assert response["exact_match"] is True
+
+    asyncio.run(run())
+
+
+def test_service_activity_logs_uses_raw_request_for_sdk_compatibility() -> None:
+    service = PinBridgeService(
+        Settings(pinbridge_api_key="pb_local_key"),
+        client_factory=_FakeClient,
+    )
+
+    async def run() -> None:
+        response = await service.list_activity_logs(
+            limit=5,
+            category="publishing",
+            status="success",
+            since="2026-03-30T12:00:00Z",
+        )
+        assert response["items"][0]["limit"] == 5
+        assert response["items"][0]["category"] == "publishing"
+        assert response["items"][0]["status"] == "success"
+        assert response["items"][0]["since"] == "2026-03-30T12:00:00+00:00"
 
     asyncio.run(run())

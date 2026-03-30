@@ -9,7 +9,6 @@ from uuid import uuid4
 
 from pinbridge_sdk import AsyncPinbridgeClient
 from pinbridge_sdk.errors import APIError, AuthenticationError, PinbridgeError
-from pinbridge_sdk.models.activity_logs import ActivityLogCategory, ActivityLogStatus
 
 from .auth import get_current_api_key
 from .config import Settings
@@ -131,21 +130,23 @@ class PinBridgeService:
         resource_type: str | None = None,
         since: str | None = None,
     ) -> dict[str, Any]:
-        parsed_category = ActivityLogCategory(category) if category is not None else None
-        parsed_status = ActivityLogStatus(status) if status is not None else None
-        parsed_since = _parse_iso_datetime(since) if since is not None else None
+        params: dict[str, Any] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        if category is not None:
+            params["category"] = category
+        if action is not None:
+            params["action"] = action
+        if status is not None:
+            params["status"] = status
+        if resource_type is not None:
+            params["resource_type"] = resource_type
+        if since is not None:
+            params["since"] = _parse_iso_datetime(since).isoformat()
 
         async with self.client() as client:
-            response = await client.activity_logs.list(
-                limit=limit,
-                cursor=cursor,
-                category=parsed_category,
-                action=action,
-                status=parsed_status,
-                resource_type=resource_type,
-                since=parsed_since,
-            )
-        return response.model_dump(mode="json")
+            response = await client.request("GET", "/v1/activity-logs", params=params)
+        return response.json()
 
     async def list_webhooks(self) -> list[dict[str, Any]]:
         async with self.client() as client:
@@ -209,4 +210,3 @@ class PinBridgeService:
         if isinstance(exc, PinbridgeError):
             return str(exc)
         return str(exc)
-
