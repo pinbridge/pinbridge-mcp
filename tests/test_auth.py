@@ -30,12 +30,22 @@ class _FakePinterest:
         return []
 
 
+class _FakeBillingStatus:
+    plan: str = "free"
+
+
+class _FakeBilling:
+    async def status(self) -> _FakeBillingStatus:
+        return _FakeBillingStatus()
+
+
 class _FakeClient:
     def __init__(self, *args, should_fail: bool = False, calls: list[str] | None = None, **kwargs):
         self.pinterest = _FakePinterest(
             should_fail=should_fail,
             calls=calls if calls is not None else [],
         )
+        self.billing = _FakeBilling()
 
     async def aclose(self) -> None:
         return None
@@ -82,8 +92,12 @@ def test_verifier_caches_successful_validation() -> None:
     verifier = PinBridgeAPIKeyVerifier(settings, client_factory=FakeClient)
 
     async def run() -> None:
-        assert await verifier.verify("pb_test_123") is True
-        assert await verifier.verify("pb_test_123") is True
+        is_valid, reason = await verifier.verify("pb_test_123")
+        assert is_valid is True
+        assert reason is None
+        is_valid2, reason2 = await verifier.verify("pb_test_123")
+        assert is_valid2 is True
+        assert reason2 is None
 
     asyncio.run(run())
 

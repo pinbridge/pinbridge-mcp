@@ -137,7 +137,93 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         except Exception as exc:
             raise ValueError(service.format_error(exc)) from exc
 
+    @mcp.tool()
+    async def list_schedules(
+        limit: int = 20,
+        offset: int = 0,
+        status: str | None = None,
+    ) -> list[dict]:
+        """List scheduled pins for the current workspace. Optionally filter by status."""
+        try:
+            return await service.list_schedules(limit=limit, offset=offset, status=status)
+        except Exception as exc:
+            raise ValueError(service.format_error(exc)) from exc
+
+    @mcp.tool()
+    async def get_schedule(schedule_id: str) -> dict:
+        """Fetch a single scheduled pin by ID."""
+        try:
+            return await service.get_schedule(schedule_id)
+        except Exception as exc:
+            raise ValueError(service.format_error(exc)) from exc
+
     if settings.enable_write_tools:
+
+        @mcp.tool()
+        async def create_schedule(
+            account_id: str,
+            board_id: str,
+            title: str,
+            run_at: str,
+            image_url: str | None = None,
+            asset_id: str | None = None,
+            description: str | None = None,
+            link_url: str | None = None,
+            cover_image_url: str | None = None,
+            cover_image_asset_id: str | None = None,
+            idempotency_key: str | None = None,
+        ) -> dict:
+            """Schedule a pin for future publishing. run_at must be ISO 8601 with timezone (e.g. 2026-04-01T10:00:00Z)."""
+            try:
+                return await service.create_schedule(
+                    account_id=account_id,
+                    board_id=board_id,
+                    title=title,
+                    run_at=run_at,
+                    image_url=image_url,
+                    asset_id=asset_id,
+                    description=description,
+                    link_url=link_url,
+                    cover_image_url=cover_image_url,
+                    cover_image_asset_id=cover_image_asset_id,
+                    idempotency_key=idempotency_key,
+                )
+            except Exception as exc:
+                raise ValueError(service.format_error(exc)) from exc
+
+        @mcp.tool()
+        async def cancel_schedule(schedule_id: str) -> dict:
+            """Cancel a pending scheduled pin by ID."""
+            try:
+                return await service.cancel_schedule(schedule_id)
+            except Exception as exc:
+                raise ValueError(service.format_error(exc)) from exc
+
+        @mcp.tool()
+        async def create_board(
+            account_id: str,
+            name: str,
+            description: str | None = None,
+            privacy: str | None = None,
+        ) -> dict:
+            """Create a new Pinterest board."""
+            try:
+                return await service.create_board(
+                    account_id=account_id,
+                    name=name,
+                    description=description,
+                    privacy=privacy,
+                )
+            except Exception as exc:
+                raise ValueError(service.format_error(exc)) from exc
+
+        @mcp.tool()
+        async def delete_board(board_id: str, account_id: str) -> dict:
+            """Permanently delete a Pinterest board."""
+            try:
+                return await service.delete_board(board_id, account_id=account_id)
+            except Exception as exc:
+                raise ValueError(service.format_error(exc)) from exc
 
         @mcp.tool()
         async def create_pin(

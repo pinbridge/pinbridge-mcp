@@ -201,6 +201,93 @@ class PinBridgeService:
             pin = await client.pins.create(payload)
         return pin.model_dump(mode="json")
 
+    async def create_schedule(
+        self,
+        *,
+        account_id: str,
+        board_id: str,
+        title: str,
+        run_at: str,
+        image_url: str | None = None,
+        asset_id: str | None = None,
+        description: str | None = None,
+        link_url: str | None = None,
+        cover_image_url: str | None = None,
+        cover_image_asset_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "account_id": account_id,
+            "board_id": board_id,
+            "title": title,
+            "run_at": _parse_iso_datetime(run_at).isoformat(),
+        }
+        if image_url is not None:
+            payload["image_url"] = image_url
+        if asset_id is not None:
+            payload["asset_id"] = asset_id
+        if description is not None:
+            payload["description"] = description
+        if link_url is not None:
+            payload["link_url"] = link_url
+        if cover_image_url is not None:
+            payload["cover_image_url"] = cover_image_url
+        if cover_image_asset_id is not None:
+            payload["cover_image_asset_id"] = cover_image_asset_id
+        if idempotency_key is not None:
+            payload["idempotency_key"] = idempotency_key
+
+        async with self.client() as client:
+            schedule = await client.schedules.create(payload)
+        return schedule.model_dump(mode="json")
+
+    async def list_schedules(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        async with self.client() as client:
+            schedules = await client.schedules.list(limit=limit, offset=offset)
+        results = [s.model_dump(mode="json") for s in schedules]
+        if status is not None:
+            results = [s for s in results if s.get("status") == status]
+        return results
+
+    async def get_schedule(self, schedule_id: str) -> dict[str, Any]:
+        async with self.client() as client:
+            schedule = await client.schedules.get(schedule_id)
+        return schedule.model_dump(mode="json")
+
+    async def cancel_schedule(self, schedule_id: str) -> dict[str, Any]:
+        async with self.client() as client:
+            schedule = await client.schedules.cancel(schedule_id)
+        return schedule.model_dump(mode="json")
+
+    async def create_board(
+        self,
+        *,
+        account_id: str,
+        name: str,
+        description: str | None = None,
+        privacy: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"account_id": account_id, "name": name}
+        if description is not None:
+            payload["description"] = description
+        if privacy is not None:
+            payload["privacy"] = privacy
+
+        async with self.client() as client:
+            board = await client.pinterest.create_board(payload)
+        return board.model_dump(mode="json")
+
+    async def delete_board(self, board_id: str, *, account_id: str) -> dict[str, Any]:
+        async with self.client() as client:
+            await client.pinterest.delete_board(board_id, account_id=account_id)
+        return {"deleted": True, "board_id": board_id}
+
     @staticmethod
     def format_error(exc: Exception) -> str:
         if isinstance(exc, AuthenticationError):

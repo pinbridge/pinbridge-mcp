@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     streamable_http_path: str = "/"
     enable_write_tools: bool = False
     log_level: str = "INFO"
+    min_plan: str = "free"
 
     @property
     def normalized_public_base_url(self) -> str:

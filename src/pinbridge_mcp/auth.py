@@ -52,9 +52,20 @@ async def _aclose_client(client: Any) -> None:
         await close()
 
 
+PLAN_RANK: dict[str, int] = {
+    "playground": 0,
+    "free": 0,
+    "starter": 1,
+    "growth": 2,
+    "pro": 3,
+    "enterprise": 4,
+}
+
+
 @dataclass(slots=True)
 class _CacheEntry:
     expires_at: float
+    plan: str = "free"
 
 
 class PinBridgeAPIKeyVerifier:
@@ -71,16 +82,21 @@ class PinBridgeAPIKeyVerifier:
         self._cache: dict[str, _CacheEntry] = {}
         self._lock = asyncio.Lock()
 
-    async def verify(self, api_key: str) -> bool:
+    async def verify(self, api_key: str) -> tuple[bool, str | None]:
+        """Return (is_valid, rejection_reason).
+
+        Returns (True, None) on success.
+        Returns (False, reason) on auth failure or insufficient plan.
+        """
         now = monotonic()
         cached = self._cache.get(api_key)
         if cached and cached.expires_at > now:
-            return True
+            return self._check_plan(cached.plan)
 
         async with self._lock:
             cached = self._cache.get(api_key)
             if cached and cached.expires_at > monotonic():
-                return True
+                return self._check_plan(cached.plan)
 
             client = self._client_factory(
                 base_url=self._settings.pinbridge_base_url,
@@ -89,15 +105,27 @@ class PinBridgeAPIKeyVerifier:
             )
             try:
                 await client.pinterest.list_accounts()
+                billing = await client.billing.status()
+                plan = getattr(billing, "plan", "free") or "free"
             except AuthenticationError:
-                return False
+                return False, "Invalid PinBridge API key"
             finally:
                 await _aclose_client(client)
 
             self._cache[api_key] = _CacheEntry(
-                expires_at=monotonic() + self._settings.auth_cache_ttl_seconds
+                expires_at=monotonic() + self._settings.auth_cache_ttl_seconds,
+                plan=plan,
             )
-            return True
+            return self._check_plan(plan)
+
+    def _check_plan(self, plan: str) -> tuple[bool, str | None]:
+        min_plan = self._settings.min_plan
+        if PLAN_RANK.get(plan, 0) < PLAN_RANK.get(min_plan, 0):
+            return False, (
+                f"Your workspace is on the '{plan}' plan. "
+                f"This MCP server requires '{min_plan}' or higher."
+            )
+        return True, None
 
 
 class APIKeyPassthroughMiddleware:
@@ -140,12 +168,17 @@ class APIKeyPassthroughMiddleware:
             return
 
         if self.settings.verify_incoming_api_keys:
-            is_valid = await self.verifier.verify(api_key)
+            is_valid, reason = await self.verifier.verify(api_key)
             if not is_valid:
+                plan_gate = reason is not None and "plan" in reason.lower()
                 response = JSONResponse(
-                    {"error": "Invalid PinBridge API key"},
-                    status_code=401,
-                    headers={"www-authenticate": 'Bearer realm="pinbridge-mcp"'},
+                    {"error": reason or "Invalid PinBridge API key"},
+                    status_code=403 if plan_gate else 401,
+                    headers=(
+                        {}
+                        if plan_gate
+                        else {"www-authenticate": 'Bearer realm="pinbridge-mcp"'}
+                    ),
                 )
                 await response(scope, receive, send)
                 return
