@@ -38,20 +38,17 @@ For local `stdio` use, set `PINBRIDGE_MCP_PINBRIDGE_API_KEY`.
 
 ## Local Setup
 
-Create a virtualenv and install the local SDK first so the MCP server uses the current workspace copy:
+Use Poetry for dependency management:
 
 ```bash
 cd pinbridge-mcp
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e ../python-sdk
-pip install -e ".[dev]"
+poetry install
 ```
 
 If you want to point at local API containers:
 
 ```bash
-export PINBRIDGE_MCP_PINBRIDGE_BASE_URL=http://127.0.0.1:8000
+export PINBRIDGE_MCP_PINBRIDGE_BASE_URL=http://127.0.0.1:8976
 ```
 
 ## Run Locally
@@ -60,19 +57,19 @@ export PINBRIDGE_MCP_PINBRIDGE_BASE_URL=http://127.0.0.1:8000
 
 ```bash
 export PINBRIDGE_MCP_PINBRIDGE_API_KEY=pb_...
-pinbridge-mcp --transport stdio
+poetry run pinbridge-mcp --transport stdio
 ```
 
 HTTP mode:
 
 ```bash
-pinbridge-mcp --transport http --host 127.0.0.1 --port 8001
+poetry run pinbridge-mcp --transport http --host 127.0.0.1 --port 57289
 ```
 
 Then connect an MCP client to:
 
 ```text
-http://127.0.0.1:8001/
+http://127.0.0.1:57289/
 ```
 
 For HTTP mode, send:
@@ -94,7 +91,49 @@ Notes:
 - treat this as a stateless edge service
 - add OAuth later if you want broader automatic client auth compatibility
 
+## Docker
+
+Build the image from the workspace root so the local `python-sdk` path dependency is available:
+
+```bash
+cd pinbridge-mcp
+docker build -f Dockerfile ..
+```
+
+Run only the MCP server against a remote or already-running PinBridge API:
+
+```bash
+cd pinbridge-mcp
+docker compose up --build mcp
+```
+
+Run the full local integration stack from this repo:
+
+```bash
+cd ../pinbridge-api
+cp .env.example .env
+
+cd pinbridge-mcp
+cp .env.example .env
+PINBRIDGE_MCP_PINBRIDGE_BASE_URL=http://api:8000 docker compose --profile full up --build
+```
+
+That `full` profile starts:
+
+- `mcp`
+- `postgres`
+- `redis`
+- `api`
+- `worker`
+- `scheduler`
+
+Ports:
+
+- MCP HTTP: `57289`
+- PinBridge API: `8976`
+- Postgres: `5433`
+- Redis: `6379`
+
 ## Safety
 
 Write tools are disabled by default. Set `PINBRIDGE_MCP_ENABLE_WRITE_TOOLS=true` only after adding stricter safeguards.
-

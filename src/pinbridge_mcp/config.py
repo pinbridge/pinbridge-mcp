@@ -15,13 +15,13 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    public_base_url: str = "http://127.0.0.1:8001"
+    public_base_url: str = "http://127.0.0.1:57289"
     pinbridge_base_url: str = "https://api.pinbridge.io"
     pinbridge_api_key: str | None = None
     verify_incoming_api_keys: bool = True
     auth_cache_ttl_seconds: int = 60
     host: str = "127.0.0.1"
-    port: int = 8001
+    port: int = 57289
     streamable_http_path: str = "/"
     enable_write_tools: bool = False
     log_level: str = "INFO"
@@ -34,4 +34,3 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
-
