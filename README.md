@@ -82,7 +82,7 @@ Authorization: Bearer <pinbridge_api_key>
 
 ## Deploy Shape
 
-For `mcp.pinbridge.io`, run the ASGI app from `pinbridge_mcp.http:create_app` behind TLS on a dedicated hostname.
+For remote deployment, run the ASGI app from `pinbridge_mcp.http:create_app` behind TLS on a dedicated hostname.
 
 Notes:
 
@@ -114,7 +114,7 @@ Run the full local integration stack from this repo:
 cd ../pinbridge-api
 cp .env.example .env
 
-cd pinbridge-mcp
+cd ../pinbridge-mcp
 cp .env.example .env
 PINBRIDGE_MCP_PINBRIDGE_BASE_URL=http://api:8000 docker compose --profile full up --build
 ```

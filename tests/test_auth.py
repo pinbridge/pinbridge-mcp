@@ -106,45 +106,87 @@ def test_verifier_caches_successful_validation() -> None:
     assert calls == ["list_accounts"]
 
 
-def test_quota_tracker_blocks_after_limit() -> None:
-    from pinbridge_mcp.quota import QuotaTracker
+def test_quota_client_passes_when_api_returns_not_exhausted() -> None:
+    """QuotaClient.check_quota returns (True, None) when API says quota is available."""
+    from unittest.mock import AsyncMock, MagicMock, patch
 
-    tracker = QuotaTracker()
-    limits = {"free": 3, "growth": 0}
+    from pinbridge_mcp.quota import QuotaClient
+
+    client = QuotaClient(base_url="https://api.pinbridge.io")
 
     async def run() -> None:
-        # First 3 should pass
-        for i in range(3):
-            ok, reason = await tracker.check_and_increment("key_a", "free", limits)
-            assert ok is True, f"request {i+1} should be allowed"
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "quota_exhausted": False,
+            "requests_used": 5,
+            "requests_limit": 100,
+            "resets_at": "2026-04-06T00:00:00Z",
+        }
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.get = AsyncMock(return_value=mock_resp)
 
-        # 4th should be blocked
-        ok, reason = await tracker.check_and_increment("key_a", "free", limits)
-        assert ok is False
-        assert "100" not in (reason or "")  # our limit is 3, not default
-        assert "3/3" in (reason or "")
+        with patch("pinbridge_mcp.quota.httpx.AsyncClient", return_value=mock_client):
+            ok, reason = await client.check_quota("pb_test_key")
 
-        # Different key is unaffected
-        ok2, _ = await tracker.check_and_increment("key_b", "free", limits)
-        assert ok2 is True
-
-        # limit=0 (growth) is always allowed
-        for _ in range(10):
-            ok3, _ = await tracker.check_and_increment("key_c", "growth", limits)
-            assert ok3 is True
+        assert ok is True
+        assert reason is None
 
     asyncio.run(run())
 
 
-def test_quota_tracker_unknown_plan_is_unlimited() -> None:
-    from pinbridge_mcp.quota import QuotaTracker
+def test_quota_client_blocks_when_api_returns_exhausted() -> None:
+    """QuotaClient.check_quota returns (False, reason) when quota_exhausted=true."""
+    from unittest.mock import AsyncMock, MagicMock, patch
 
-    tracker = QuotaTracker()
-    limits = {"free": 1}
+    from pinbridge_mcp.quota import QuotaClient
+
+    client = QuotaClient(base_url="https://api.pinbridge.io")
 
     async def run() -> None:
-        for _ in range(5):
-            ok, _ = await tracker.check_and_increment("key_x", "enterprise", limits)
-            assert ok is True  # not in limits → defaults to 0 (unlimited)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "quota_exhausted": True,
+            "requests_used": 100,
+            "requests_limit": 100,
+            "resets_at": "2026-04-06T00:00:00Z",
+        }
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        with patch("pinbridge_mcp.quota.httpx.AsyncClient", return_value=mock_client):
+            ok, reason = await client.check_quota("pb_test_key")
+
+        assert ok is False
+        assert reason is not None
+        assert "100/100" in reason
+
+    asyncio.run(run())
+
+
+def test_quota_client_fails_open_on_api_error() -> None:
+    """QuotaClient.check_quota allows request through if API is unreachable."""
+    from unittest.mock import AsyncMock, patch
+
+    from pinbridge_mcp.quota import QuotaClient
+
+    client = QuotaClient(base_url="https://api.pinbridge.io")
+
+    async def run() -> None:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.get = AsyncMock(side_effect=Exception("connection refused"))
+
+        with patch("pinbridge_mcp.quota.httpx.AsyncClient", return_value=mock_client):
+            ok, reason = await client.check_quota("pb_test_key")
+
+        assert ok is True  # fail open
+        assert reason is None
 
     asyncio.run(run())

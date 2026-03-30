@@ -14,7 +14,7 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 
 from .config import Settings
-from .quota import QuotaTracker
+from .quota import QuotaClient
 
 _current_api_key: ContextVar[str | None] = ContextVar("pinbridge_mcp_api_key", default=None)
 
@@ -153,12 +153,12 @@ class APIKeyPassthroughMiddleware:
         *,
         settings: Settings,
         verifier: PinBridgeAPIKeyVerifier,
-        quota_tracker: QuotaTracker | None = None,
+        quota_client: QuotaClient | None = None,
     ) -> None:
         self.app = app
         self.settings = settings
         self.verifier = verifier
-        self.quota_tracker = quota_tracker or QuotaTracker()
+        self.quota_client = quota_client
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] != "http":
@@ -202,10 +202,8 @@ class APIKeyPassthroughMiddleware:
                 await response(scope, receive, send)
                 return
 
-        if self.settings.enable_quota:
-            within_quota, quota_reason = await self.quota_tracker.check_and_increment(
-                api_key, plan, self.settings.plan_weekly_limits
-            )
+        if self.settings.enable_quota and self.quota_client is not None:
+            within_quota, quota_reason = await self.quota_client.check_quota(api_key)
             if not within_quota:
                 response = JSONResponse({"error": quota_reason}, status_code=429)
                 await response(scope, receive, send)
@@ -216,3 +214,5 @@ class APIKeyPassthroughMiddleware:
             await self.app(scope, receive, send)
         finally:
             reset_current_api_key(token)
+            if self.settings.enable_quota and self.quota_client is not None:
+                self.quota_client.track_background(api_key)
