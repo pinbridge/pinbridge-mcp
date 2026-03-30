@@ -27,24 +27,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     min_plan: str = "free"
 
-    # Quota — weekly request limits per plan (0 = unlimited)
+    # Quota — enforced via API (db-backed), not in-memory
     enable_quota: bool = True
-    quota_free: int = 100
-    quota_starter: int = 500
-    quota_growth: int = 2000
-    quota_pro: int = 10000
-    quota_enterprise: int = 0  # unlimited
-
-    @property
-    def plan_weekly_limits(self) -> dict[str, int]:
-        return {
-            "free": self.quota_free,
-            "playground": self.quota_free,
-            "starter": self.quota_starter,
-            "growth": self.quota_growth,
-            "pro": self.quota_pro,
-            "enterprise": self.quota_enterprise,
-        }
 
     @property
     def normalized_public_base_url(self) -> str:
