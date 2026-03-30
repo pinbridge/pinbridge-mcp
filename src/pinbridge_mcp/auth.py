@@ -106,7 +106,7 @@ class PinBridgeAPIKeyVerifier:
             try:
                 await client.pinterest.list_accounts()
                 billing = await client.billing.status()
-                plan = getattr(billing, "plan", "free") or "free"
+                plan = str(getattr(billing, "plan", "free") or "free")
             except AuthenticationError:
                 return False, "Invalid PinBridge API key"
             finally:
