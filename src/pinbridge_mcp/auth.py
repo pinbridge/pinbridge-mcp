@@ -14,6 +14,7 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 
 from .config import Settings
+from .quota import QuotaTracker
 
 _current_api_key: ContextVar[str | None] = ContextVar("pinbridge_mcp_api_key", default=None)
 
@@ -91,21 +92,23 @@ class PinBridgeAPIKeyVerifier:
         self._cache: dict[str, _CacheEntry] = {}
         self._lock = asyncio.Lock()
 
-    async def verify(self, api_key: str) -> tuple[bool, str | None]:
-        """Return (is_valid, rejection_reason).
+    async def verify(self, api_key: str) -> tuple[bool, str | None, str]:
+        """Return (is_valid, rejection_reason, plan).
 
-        Returns (True, None) on success.
-        Returns (False, reason) on auth failure or insufficient plan.
+        Returns (True, None, plan_slug) on success.
+        Returns (False, reason, "") on auth failure or insufficient plan.
         """
         now = monotonic()
         cached = self._cache.get(api_key)
         if cached and cached.expires_at > now:
-            return self._check_plan(cached.plan)
+            ok, reason = self._check_plan(cached.plan)
+            return ok, reason, cached.plan if ok else ""
 
         async with self._lock:
             cached = self._cache.get(api_key)
             if cached and cached.expires_at > monotonic():
-                return self._check_plan(cached.plan)
+                ok, reason = self._check_plan(cached.plan)
+                return ok, reason, cached.plan if ok else ""
 
             client = self._client_factory(
                 base_url=self._settings.pinbridge_base_url,
@@ -118,7 +121,7 @@ class PinBridgeAPIKeyVerifier:
                 raw_plan = getattr(billing, "plan", "free") or "free"
                 plan = raw_plan.value if hasattr(raw_plan, "value") else str(raw_plan)
             except AuthenticationError:
-                return False, "Invalid PinBridge API key"
+                return False, "Invalid PinBridge API key", ""
             finally:
                 await _aclose_client(client)
 
@@ -126,7 +129,8 @@ class PinBridgeAPIKeyVerifier:
                 expires_at=monotonic() + self._settings.auth_cache_ttl_seconds,
                 plan=plan,
             )
-            return self._check_plan(plan)
+            ok, reason = self._check_plan(plan)
+            return ok, reason, plan if ok else ""
 
     def _check_plan(self, plan: str) -> tuple[bool, str | None]:
         min_plan = self._settings.min_plan
@@ -141,7 +145,7 @@ class PinBridgeAPIKeyVerifier:
 
 
 class APIKeyPassthroughMiddleware:
-    """Require a bearer token and expose it to MCP tool handlers."""
+    """Require a bearer token, enforce plan gate and weekly quota, expose key to handlers."""
 
     def __init__(
         self,
@@ -149,10 +153,12 @@ class APIKeyPassthroughMiddleware:
         *,
         settings: Settings,
         verifier: PinBridgeAPIKeyVerifier,
+        quota_tracker: QuotaTracker | None = None,
     ) -> None:
         self.app = app
         self.settings = settings
         self.verifier = verifier
+        self.quota_tracker = quota_tracker or QuotaTracker()
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] != "http":
@@ -179,8 +185,9 @@ class APIKeyPassthroughMiddleware:
             await response(scope, receive, send)
             return
 
+        plan = "free"
         if self.settings.verify_incoming_api_keys:
-            is_valid, reason = await self.verifier.verify(api_key)
+            is_valid, reason, plan = await self.verifier.verify(api_key)
             if not is_valid:
                 plan_gate = reason is not None and "plan" in reason.lower()
                 response = JSONResponse(
@@ -192,6 +199,15 @@ class APIKeyPassthroughMiddleware:
                         else {"www-authenticate": 'Bearer realm="pinbridge-mcp"'}
                     ),
                 )
+                await response(scope, receive, send)
+                return
+
+        if self.settings.enable_quota:
+            within_quota, quota_reason = await self.quota_tracker.check_and_increment(
+                api_key, plan, self.settings.plan_weekly_limits
+            )
+            if not within_quota:
+                response = JSONResponse({"error": quota_reason}, status_code=429)
                 await response(scope, receive, send)
                 return
 

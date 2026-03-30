@@ -10,6 +10,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
 from .auth import APIKeyPassthroughMiddleware, PinBridgeAPIKeyVerifier
+from .quota import QuotaTracker
 from .config import Settings, get_settings
 from .server import create_mcp_server
 
@@ -47,6 +48,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
         APIKeyPassthroughMiddleware,
         settings=settings,
         verifier=PinBridgeAPIKeyVerifier(settings),
+        quota_tracker=QuotaTracker(),
     )
     return app
 
