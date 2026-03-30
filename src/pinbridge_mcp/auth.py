@@ -61,6 +61,15 @@ PLAN_RANK: dict[str, int] = {
     "enterprise": 4,
 }
 
+PLAN_DISPLAY: dict[str, str] = {
+    "free": "Playground",
+    "playground": "Playground",
+    "starter": "Starter",
+    "growth": "Growth",
+    "pro": "Pro",
+    "enterprise": "Enterprise",
+}
+
 
 @dataclass(slots=True)
 class _CacheEntry:
@@ -122,9 +131,11 @@ class PinBridgeAPIKeyVerifier:
     def _check_plan(self, plan: str) -> tuple[bool, str | None]:
         min_plan = self._settings.min_plan
         if PLAN_RANK.get(plan, 0) < PLAN_RANK.get(min_plan, 0):
+            plan_display = PLAN_DISPLAY.get(plan, plan.capitalize())
+            min_plan_display = PLAN_DISPLAY.get(min_plan, min_plan.capitalize())
             return False, (
-                f"Your workspace is on the '{plan}' plan. "
-                f"This MCP server requires '{min_plan}' or higher."
+                f"Your workspace is on the {plan_display} plan. "
+                f"This MCP server requires {min_plan_display} or higher."
             )
         return True, None
 
