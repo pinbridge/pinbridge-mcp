@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.pinbridge/pinbridge",
-  "description": "Publish and schedule Pinterest pins from any MCP client. Connect a Pinterest account once and PinBridge handles OAuth token refresh, rate limits, retries and delivery status.",
+  "description": "Publish and schedule Pinterest pins from any MCP client. Token refresh and retries handled.",
   "version": "1.0.0",
   "websiteUrl": "https://www.pinbridge.io",
   "remotes": [
