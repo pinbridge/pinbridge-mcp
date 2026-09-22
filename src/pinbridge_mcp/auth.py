@@ -160,6 +160,18 @@ class APIKeyPassthroughMiddleware:
         self.verifier = verifier
         self.quota_client = quota_client
 
+    def _challenge_header(self) -> str:
+        """WWW-Authenticate value pointing clients at protected-resource metadata.
+
+        This is what makes an MCP client (e.g. Claude) discover the OAuth flow
+        (RFC 9728) rather than silently prompt for a pasted API key.
+        """
+        base = self.settings.normalized_public_base_url
+        return (
+            'Bearer realm="pinbridge-mcp", '
+            f'resource_metadata="{base}/.well-known/oauth-protected-resource"'
+        )
+
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
@@ -167,7 +179,11 @@ class APIKeyPassthroughMiddleware:
 
         path = scope.get("path", "")
         method = scope.get("method", "GET").upper()
-        if path == "/healthz" or method == "OPTIONS":
+        if (
+            path == "/healthz"
+            or path == "/.well-known/oauth-protected-resource"
+            or method == "OPTIONS"
+        ):
             await self.app(scope, receive, send)
             return
 
@@ -180,7 +196,7 @@ class APIKeyPassthroughMiddleware:
             response = JSONResponse(
                 {"error": "Missing Authorization: Bearer <PinBridge API key>"},
                 status_code=401,
-                headers={"www-authenticate": 'Bearer realm="pinbridge-mcp"'},
+                headers={"www-authenticate": self._challenge_header()},
             )
             await response(scope, receive, send)
             return
@@ -193,11 +209,7 @@ class APIKeyPassthroughMiddleware:
                 response = JSONResponse(
                     {"error": reason or "Invalid PinBridge API key"},
                     status_code=403 if plan_gate else 401,
-                    headers=(
-                        {}
-                        if plan_gate
-                        else {"www-authenticate": 'Bearer realm="pinbridge-mcp"'}
-                    ),
+                    headers=({} if plan_gate else {"www-authenticate": self._challenge_header()}),
                 )
                 await response(scope, receive, send)
                 return
