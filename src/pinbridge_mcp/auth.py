@@ -189,8 +189,7 @@ class APIKeyPassthroughMiddleware:
 
         headers = Headers(scope=scope)
         api_key = (
-            extract_bearer_token(headers.get("authorization"))
-            or self.settings.pinbridge_api_key
+            extract_bearer_token(headers.get("authorization")) or self.settings.pinbridge_api_key
         )
         if api_key is None:
             response = JSONResponse(

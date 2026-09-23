@@ -13,16 +13,27 @@ This server is workspace-scoped. A PinBridge API key resolves to one workspace, 
 
 ## Current Tools
 
-- `server_info`
-- `list_pinterest_accounts`
-- `list_boards`
-- `list_related_terms`
-- `list_pins`
-- `get_pin`
-- `list_activity_logs`
-- `list_webhooks`
-- `get_billing_status`
-- `get_rate_meter`
+Read tools (always registered):
+
+- `server_info`, `list_pinterest_accounts`, `list_boards`, `check_board_access`
+- `list_related_terms`, `list_pins` (filters: account, board, status, error code, since/until), `get_pin`
+- `get_pin_analytics`, `get_account_analytics`
+- `validate_pin` (dry run: every check `create_pin` runs, nothing published)
+- `list_activity_logs`, `list_webhooks`, `get_billing_status`, `get_rate_meter`
+- `list_schedules` (server-side filters), `get_schedule`
+
+Write tools (registered when `PINBRIDGE_MCP_ENABLE_WRITE_TOOLS=true`):
+
+- `upload_asset` (base64 or a URL this server can download; returns an `asset_id`)
+- `create_pin` and `create_schedule` (both take `dry_run`), `create_pins_batch`
+- `update_pin`, `delete_pin` (Pinterest-side by default), `retry_pin`
+- `cancel_schedule`, `create_board`, `delete_board`, `create_webhook`, `delete_webhook`
+
+Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`), so clients can decide what needs a confirmation. Errors surface the API's stable `code` and `remediation`, e.g. `PinBridge API error (422) [board_not_found]: ... Fix: ...`.
+
+Resources: `pinbridge://accounts` and `pinbridge://accounts/{account_id}/boards`. Prompt: `publish_pin` (upload → validate → publish → measure).
+
+Requires PinBridge API ≥ 1.30 for `check_board_access`, `validate_pin`, `update_pin`, `delete_pin`, analytics, batch and the list filters. Those calls use the SDK's raw `request`; typed SDK methods follow (see `roadmap/SDK_Roadmap_Sept2026.md` in the workspace).
 
 ## Auth Model
 
