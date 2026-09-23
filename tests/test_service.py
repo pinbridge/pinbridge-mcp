@@ -4,7 +4,7 @@ import asyncio
 import base64
 
 import pytest
-from pinbridge_sdk.errors import APIError
+from pinbridge_sdk.errors import APIError, AuthenticationError
 
 from pinbridge_mcp.auth import bind_current_api_key, reset_current_api_key
 from pinbridge_mcp.config import Settings
@@ -58,9 +58,14 @@ class _FakePinterest:
 class _FakePins:
     def __init__(self) -> None:
         self.created: list[dict] = []
+        self.retries: list[tuple[str, dict | None]] = []
 
     async def get(self, pin_id: str) -> _FakeModel:
         return _FakeModel({"id": pin_id, "title": "Demo pin"})
+
+    async def retry(self, pin_id: str, data: dict | None = None) -> _FakeModel:
+        self.retries.append((pin_id, data))
+        return _FakeModel({"id": pin_id, "status": "queued"})
 
     async def create(self, payload: dict) -> _FakeModel:
         self.created.append(payload)
@@ -81,11 +86,17 @@ class _FakeAssets:
 
 
 class _FakeWebhooks:
+    def __init__(self) -> None:
+        self.deleted: list[str] = []
+
     async def list(self) -> list[_FakeModel]:
         return [_FakeModel({"id": "webhook_1", "url": "https://example.com/webhook"})]
 
     async def create(self, payload: dict) -> _FakeModel:
         return _FakeModel({"id": "webhook_new", **payload})
+
+    async def delete(self, webhook_id: str) -> None:
+        self.deleted.append(webhook_id)
 
 
 class _FakeBilling:
@@ -150,13 +161,11 @@ class _FakeClient:
         if path == "/v1/pins/{pin_id}" and method == "PATCH":
             return _FakeResponse({"id": kwargs["path_params"]["pin_id"], **kwargs["json"]})
         if path == "/v1/pins/{pin_id}" and method == "DELETE":
-            if kwargs.get("params"):
+            if kwargs.get("params") and kwargs["path_params"]["pin_id"] != "pin_old_api":
                 return _FakeResponse(
                     {"id": "pin_1", "deleted": True, "removed_from_pinterest": True}
                 )
             return _FakeResponse(None, status_code=204)
-        if path == "/v1/pins/{pin_id}/retry":
-            return _FakeResponse({"id": kwargs["path_params"]["pin_id"], "status": "queued"})
         if path.endswith("/analytics"):
             return _FakeResponse(
                 {"totals": {"impression": 5}, "daily": [], **(kwargs.get("params") or {})}
@@ -165,8 +174,6 @@ class _FakeClient:
             return _FakeResponse(
                 {"publishable": True, "status": "ok", **(kwargs.get("params") or {})}
             )
-        if path == "/v1/webhooks/{webhook_id}" and method == "DELETE":
-            return _FakeResponse(None, status_code=204)
         raise AssertionError(f"Unexpected request: {method} {path}")
 
 
@@ -327,9 +334,15 @@ def test_update_delete_retry_and_analytics_hit_new_endpoints() -> None:
             "reason": "record_only",
         }
 
+        old_api = await service.delete_pin("pin_old_api")
+        assert old_api["reason"] == "api_version_too_old"
+        assert "still live on Pinterest" in old_api["warning"]
+
         retried = await service.retry_pin("pin_1", board_id="b2")
         assert retried["status"] == "queued"
-        assert _last_request()["json"] == {"board_id": "b2"}
+        assert _FakeClient.instances[-1].pins.retries == [("pin_1", {"board_id": "b2"})]
+        await service.retry_pin("pin_1")
+        assert _FakeClient.instances[-1].pins.retries[-1] == ("pin_1", None)
 
         analytics = await service.get_pin_analytics(
             "pin_1", start_date="2026-09-01", metrics="IMPRESSION"
@@ -364,7 +377,7 @@ def test_upload_asset_from_base64_and_validation() -> None:
         )
 
         video = await service.upload_asset(
-            filename="clip.mp4", content_base64=payload, media_type="video"
+            filename="clip.mp4", content_base64=payload, asset_type="video"
         )
         assert video["id"] == "asset_2"
 
@@ -374,21 +387,49 @@ def test_upload_asset_from_base64_and_validation() -> None:
         asyncio.run(service.upload_asset(filename="x.png"))
     with pytest.raises(ValueError, match="valid base64"):
         asyncio.run(service.upload_asset(filename="x.png", content_base64="not base64!!"))
-    with pytest.raises(ValueError, match="media_type"):
-        asyncio.run(service.upload_asset(filename="x.gif", content_base64="aGk=", media_type="gif"))
+    with pytest.raises(ValueError, match="asset_type"):
+        asyncio.run(service.upload_asset(filename="x.gif", content_base64="aGk=", asset_type="gif"))
 
 
-def test_upload_asset_from_source_url(monkeypatch) -> None:
+def test_upload_asset_accepts_wrapped_unpadded_and_data_uri_base64() -> None:
     service = _service()
+    raw = base64.b64encode(b"hello world").decode()  # aGVsbG8gd29ybGQ=
+    variants = [
+        raw[:8] + "\n" + raw[8:],
+        raw.rstrip("="),
+        f"data:image/png;base64,{raw}",
+    ]
+    for variant in variants:
+        asyncio.run(service.upload_asset(filename="x.png", content_base64=variant))
+        assert _FakeClient.instances[-1].assets.uploads[-1][1] == b"hello world"
 
-    class _Fetched:
-        status_code = 200
-        content = b"bytes-from-url"
-        headers = {"content-type": "image/jpeg; charset=binary"}
 
+class _StreamedResponse:
+    def __init__(self, status_code=200, headers=None, chunks=(b"bytes-from-url",)):
+        self.status_code = status_code
+        self.headers = headers or {"content-type": "image/jpeg; charset=binary"}
+        self._chunks = chunks
+
+    async def aiter_bytes(self, size):
+        for chunk in self._chunks:
+            yield chunk
+
+
+class _StreamContext:
+    def __init__(self, response):
+        self._response = response
+
+    async def __aenter__(self):
+        return self._response
+
+    async def __aexit__(self, *args):
+        return None
+
+
+def _install_fetcher(monkeypatch, response, seen: list[str]):
     class _Fetcher:
         def __init__(self, *args, **kwargs) -> None:
-            pass
+            assert kwargs.get("follow_redirects") is False
 
         async def __aenter__(self):
             return self
@@ -396,18 +437,78 @@ def test_upload_asset_from_source_url(monkeypatch) -> None:
         async def __aexit__(self, *args) -> None:
             return None
 
-        async def get(self, url: str):
-            assert url == "https://cdn.example.com/hero.jpg"
-            return _Fetched()
+        def stream(self, method: str, url: str):
+            seen.append(url)
+            return _StreamContext(response)
 
     monkeypatch.setattr("pinbridge_mcp.service.httpx.AsyncClient", _Fetcher)
+
+
+def test_upload_asset_from_public_source_url(monkeypatch) -> None:
+    service = _service()
+    monkeypatch.setattr("pinbridge_mcp.service._host_is_public", lambda host: True)
+    seen: list[str] = []
+    _install_fetcher(monkeypatch, _StreamedResponse(), seen)
 
     asset = asyncio.run(
         service.upload_asset(filename="hero.jpg", source_url="https://cdn.example.com/hero.jpg")
     )
     assert asset["id"] == "asset_1"
+    assert seen == ["https://cdn.example.com/hero.jpg"]
     kind, data, filename, content_type = _FakeClient.instances[-1].assets.uploads[0]
     assert (data, content_type) == (b"bytes-from-url", "image/jpeg")
+
+
+def test_upload_asset_refuses_private_hosts_schemes_and_redirects(monkeypatch) -> None:
+    service = _service()
+    seen: list[str] = []
+
+    for url in (
+        "http://127.0.0.1:8000/x.png",
+        "http://169.254.169.254/latest",
+        "http://api:8000/x",
+    ):
+        with pytest.raises(ValueError, match="public host"):
+            asyncio.run(service.upload_asset(filename="x.png", source_url=url))
+    with pytest.raises(ValueError, match="http\\(s\\)"):
+        asyncio.run(service.upload_asset(filename="x.png", source_url="file:///etc/passwd"))
+
+    monkeypatch.setattr("pinbridge_mcp.service._host_is_public", lambda host: True)
+    _install_fetcher(
+        monkeypatch, _StreamedResponse(status_code=302, headers={"location": "https://z"}), seen
+    )
+    with pytest.raises(ValueError, match="redirects"):
+        asyncio.run(service.upload_asset(filename="x.png", source_url="https://cdn.example.com/a"))
+
+
+def test_upload_asset_enforces_size_ceiling_while_streaming(monkeypatch) -> None:
+    from pinbridge_mcp import service as service_module
+
+    service = _service()
+    monkeypatch.setattr("pinbridge_mcp.service._host_is_public", lambda host: True)
+    monkeypatch.setattr(service_module, "_MAX_ASSET_BYTES", 10)
+    seen: list[str] = []
+    _install_fetcher(monkeypatch, _StreamedResponse(headers={"content-length": "11"}), seen)
+    with pytest.raises(ValueError, match="200 MB"):
+        asyncio.run(service.upload_asset(filename="x.png", source_url="https://cdn.example.com/a"))
+
+    _install_fetcher(
+        monkeypatch, _StreamedResponse(headers={}, chunks=(b"123456", b"7890123")), seen
+    )
+    with pytest.raises(ValueError, match="200 MB"):
+        asyncio.run(service.upload_asset(filename="x.png", source_url="https://cdn.example.com/b"))
+
+
+def test_host_is_public_rejects_private_and_accepts_global(monkeypatch) -> None:
+    from pinbridge_mcp.service import _host_is_public
+
+    def fake_getaddrinfo(host, port):
+        table = {"private.internal": "10.0.0.5", "public.example": "93.184.216.34"}
+        return [(None, None, None, None, (table[host], 0))]
+
+    monkeypatch.setattr("pinbridge_mcp.service.socket.getaddrinfo", fake_getaddrinfo)
+    assert _host_is_public("private.internal") is False
+    assert _host_is_public("public.example") is True
 
 
 def test_webhook_create_and_delete() -> None:
@@ -420,7 +521,7 @@ def test_webhook_create_and_delete() -> None:
         assert created["id"] == "webhook_new"
         deleted = await service.delete_webhook("webhook_1")
         assert deleted == {"deleted": True, "webhook_id": "webhook_1"}
-        assert _last_request()["path_params"] == {"webhook_id": "webhook_1"}
+        assert _FakeClient.instances[-1].webhooks.deleted == ["webhook_1"]
 
     asyncio.run(run())
 
@@ -449,6 +550,58 @@ def test_format_error_surfaces_code_and_remediation() -> None:
         "visible to the connected account. Fix: Refresh the board list and use a board ID "
         "that belongs to this account."
     )
+    scope = AuthenticationError(
+        status_code=403,
+        message="This API key does not have the 'write' scope.",
+        details={
+            "error": {
+                "code": "insufficient_scope",
+                "message": "This API key does not have the 'write' scope.",
+                "remediation": "Ask a workspace admin for a key with the write scope.",
+            }
+        },
+    )
+    assert PinBridgeService.format_error(scope) == (
+        "PinBridge API error (403) [insufficient_scope]: This API key does not have the "
+        "'write' scope. Fix: Ask a workspace admin for a key with the write scope."
+    )
+    login = AuthenticationError(
+        status_code=401, message="Invalid API key", details="Invalid API key"
+    )
+    assert (
+        PinBridgeService.format_error(login) == "PinBridge authentication failed: Invalid API key"
+    )
+
+    validation = APIError(
+        status_code=422,
+        message="Request validation failed for: title.",
+        details={
+            "error": {
+                "code": "validation_error",
+                "message": "Request validation failed for: title.",
+                "errors": [
+                    {"loc": ["body", "title"], "msg": "String should have at most 100 characters"}
+                ],
+            }
+        },
+    )
+    assert PinBridgeService.format_error(validation) == (
+        "PinBridge API error (422) [validation_error]: Request validation failed for: title. "
+        "(title: String should have at most 100 characters)"
+    )
+    limited = APIError(
+        status_code=429,
+        message="Too many Pinterest read requests",
+        details={
+            "error": {
+                "code": "rate_limited",
+                "message": "Too many Pinterest read requests",
+                "retry_after_seconds": 42,
+                "remediation": "Retry after the Retry-After window.",
+            }
+        },
+    )
+    assert "Retry after 42s." in PinBridgeService.format_error(limited)
     plain = APIError(status_code=500, message="Internal server error", details="boom")
     assert (
         PinBridgeService.format_error(plain) == "PinBridge API error (500): Internal server error"

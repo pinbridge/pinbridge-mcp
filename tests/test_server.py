@@ -17,7 +17,6 @@ READ_ONLY_TOOLS = {
     "get_pin",
     "get_pin_analytics",
     "get_account_analytics",
-    "validate_pin",
     "list_activity_logs",
     "list_webhooks",
     "get_billing_status",
@@ -67,14 +66,24 @@ def test_write_server_registers_every_roadmap_tool_with_annotations() -> None:
         assert annotations is not None, name
         assert annotations.readOnlyHint is False, name
         assert annotations.destructiveHint is (name in DESTRUCTIVE_TOOLS), name
-    assert tools["create_pin"].annotations.idempotentHint is True
-    assert tools["upload_asset"].annotations.idempotentHint is False
+    # Creates mint an idempotency key when none is supplied, so a repeat call publishes
+    # again: they must not advertise idempotency.
+    for name in ("create_pin", "create_pins_batch", "create_schedule", "upload_asset"):
+        assert tools[name].annotations.idempotentHint is False, name
+    assert tools["update_pin"].annotations.idempotentHint is True
 
 
 def test_create_pin_and_schedule_expose_dry_run() -> None:
     tools = _tools(enable_write_tools=True)
     assert "dry_run" in tools["create_pin"].inputSchema["properties"]
     assert "dry_run" in tools["create_schedule"].inputSchema["properties"]
+    assert "idempotency_key" not in tools["create_schedule"].inputSchema["properties"]
+    batch_items = tools["create_pins_batch"].inputSchema["properties"]["pins"]["items"]
+    assert "$ref" in batch_items or "properties" in batch_items
+    assert tools["upload_asset"].inputSchema["properties"]["asset_type"]["enum"] == [
+        "image",
+        "video",
+    ]
     assert {"account_id", "board_id", "status", "error_code", "since", "until"} <= set(
         tools["list_pins"].inputSchema["properties"]
     )
@@ -96,7 +105,10 @@ def test_resources_and_prompt_are_registered() -> None:
     assert "Announce the sale" in text
     assert "upload_asset" in text
     assert "dry_run=true" in text
+    assert "resolved.idempotency_key" in text
+    assert "deferred" in text
     assert "delete_pin" in text
+    assert all(argument.description for argument in prompts[0].arguments or [])
 
 
 def test_instructions_describe_the_workflow_and_error_contract() -> None:

@@ -8,12 +8,16 @@ MCP server does not wait on an SDK release; see the SDK roadmap for the swap.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
+import ipaddress
+import socket
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
@@ -24,15 +28,93 @@ from . import __version__
 from .auth import get_current_api_key
 from .config import Settings
 
-_MAX_FETCHED_ASSET_BYTES = 200 * 1024 * 1024
+_MAX_ASSET_BYTES = 200 * 1024 * 1024
 _ASSET_FETCH_TIMEOUT_SECONDS = 60.0
+_FETCH_CHUNK_BYTES = 1024 * 1024
 
 
-def _parse_iso_datetime(value: str) -> datetime:
+def _parse_iso_datetime(value: str, field: str = "timestamp") -> datetime:
     normalized = value.strip()
     if normalized.endswith("Z"):
         normalized = f"{normalized[:-1]}+00:00"
-    return datetime.fromisoformat(normalized)
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError(
+            f"{field} must be an ISO 8601 timestamp such as 2026-04-01T10:00:00Z (got {value!r})"
+        ) from exc
+
+
+def _decode_base64(value: str) -> bytes:
+    """Decode base64 the way agents produce it: line-wrapped, possibly unpadded."""
+    compact = "".join(value.split())
+    if compact.startswith("data:") and "," in compact:
+        compact = compact.split(",", 1)[1]
+    compact += "=" * (-len(compact) % 4)
+    try:
+        return base64.b64decode(compact, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("content_base64 is not valid base64") from exc
+
+
+def _host_is_public(hostname: str) -> bool:
+    """Resolve a hostname and refuse anything that is not a globally routable address."""
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        address = ipaddress.ip_address(info[4][0])
+        if not address.is_global:
+            return False
+    return True
+
+
+async def _fetch_public_url(url: str, content_type: str | None) -> tuple[bytes, str | None]:
+    """Download a public URL with SSRF and size guards.
+
+    Only http(s), only globally routable hosts, no redirects (the caller passes
+    the final URL), and the body is streamed against the size ceiling instead of
+    being buffered first.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("source_url must be an http(s) URL")
+    if not await asyncio.to_thread(_host_is_public, parsed.hostname):
+        raise ValueError(
+            "source_url must point at a public host; private, loopback and link-local "
+            "addresses are refused"
+        )
+    async with httpx.AsyncClient(
+        timeout=_ASSET_FETCH_TIMEOUT_SECONDS, follow_redirects=False
+    ) as fetcher:
+        async with fetcher.stream("GET", url) as fetched:
+            if 300 <= fetched.status_code < 400:
+                raise ValueError(
+                    "source_url redirects; pass the final URL it redirects to "
+                    f"({fetched.headers.get('location', 'unknown')})"
+                )
+            if fetched.status_code >= 400:
+                raise ValueError(
+                    f"Could not fetch source_url (HTTP {fetched.status_code}); the URL must "
+                    "be publicly readable."
+                )
+            declared = fetched.headers.get("content-length")
+            if declared and declared.isdigit() and int(declared) > _MAX_ASSET_BYTES:
+                raise ValueError("The asset exceeds the 200 MB upload ceiling")
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in fetched.aiter_bytes(_FETCH_CHUNK_BYTES):
+                total += len(chunk)
+                if total > _MAX_ASSET_BYTES:
+                    raise ValueError("The asset exceeds the 200 MB upload ceiling")
+                chunks.append(chunk)
+            if not content_type:
+                header = fetched.headers.get("content-type", "")
+                content_type = header.split(";", 1)[0].strip() or None
+    return b"".join(chunks), content_type
 
 
 def _normalize_terms(terms: str | list[str]) -> list[str]:
@@ -119,15 +201,7 @@ class PinBridgeService:
             "workspace_scope": "api_key",
             "streamable_http_path": self.settings.streamable_http_path,
             "write_tools_enabled": self.settings.enable_write_tools,
-            "capabilities": {
-                "upload_asset": self.settings.enable_write_tools,
-                "validate_before_publish": True,
-                "analytics": True,
-                "board_access_check": True,
-                "batch_publish": self.settings.enable_write_tools,
-                "resources": ["pinbridge://accounts", "pinbridge://accounts/{account_id}/boards"],
-                "prompts": ["publish_pin"],
-            },
+            "requires_pinbridge_api": ">=1.30",
         }
 
     # ------------------------------------------------------------------ accounts / boards
@@ -185,42 +259,27 @@ class PinBridgeService:
         content_base64: str | None = None,
         source_url: str | None = None,
         content_type: str | None = None,
-        media_type: str = "image",
+        asset_type: str = "image",
     ) -> dict[str, Any]:
         """Upload an image or video and return the asset (``id`` feeds ``asset_id``)."""
-        if media_type not in {"image", "video"}:
-            raise ValueError("media_type must be 'image' or 'video'")
+        if asset_type not in {"image", "video"}:
+            raise ValueError("asset_type must be 'image' or 'video'")
         if bool(content_base64) == bool(source_url):
             raise ValueError("Provide exactly one of content_base64 or source_url")
 
         if content_base64 is not None:
-            try:
-                data = base64.b64decode(content_base64, validate=True)
-            except (binascii.Error, ValueError) as exc:
-                raise ValueError("content_base64 is not valid base64") from exc
+            data = _decode_base64(content_base64)
         else:
             assert source_url is not None
-            async with httpx.AsyncClient(
-                timeout=_ASSET_FETCH_TIMEOUT_SECONDS, follow_redirects=True
-            ) as fetcher:
-                fetched = await fetcher.get(source_url)
-            if fetched.status_code >= 400:
-                raise ValueError(
-                    f"Could not fetch source_url (HTTP {fetched.status_code}); the URL must be "
-                    "publicly readable."
-                )
-            data = fetched.content
-            if not content_type:
-                header = fetched.headers.get("content-type", "")
-                content_type = header.split(";", 1)[0].strip() or None
+            data, content_type = await _fetch_public_url(source_url, content_type)
         if not data:
             raise ValueError("The asset is empty")
-        if len(data) > _MAX_FETCHED_ASSET_BYTES:
+        if len(data) > _MAX_ASSET_BYTES:
             raise ValueError("The asset exceeds the 200 MB upload ceiling")
 
         async with self.client() as client:
             uploader = (
-                client.assets.upload_image if media_type == "image" else client.assets.upload_video
+                client.assets.upload_image if asset_type == "image" else client.assets.upload_video
             )
             asset = await uploader(data, filename=filename, content_type=content_type)
         return _dump(asset)
@@ -247,8 +306,8 @@ class PinBridgeService:
                 "board_id": board_id,
                 "status": status,
                 "error_code": error_code,
-                "since": _parse_iso_datetime(since).isoformat() if since else None,
-                "until": _parse_iso_datetime(until).isoformat() if until else None,
+                "since": _parse_iso_datetime(since, "since").isoformat() if since else None,
+                "until": _parse_iso_datetime(until, "until").isoformat() if until else None,
             }
         )
         async with self.client() as client:
@@ -390,12 +449,24 @@ class PinBridgeService:
                 "DELETE", "/v1/pins/{pin_id}", path_params={"pin_id": pin_id}, params=params
             )
         if response.status_code == 204 or not response.content:
+            # API >= 1.30 answers the flagged variant with a 200 body; a bare 204
+            # means an older API ignored the flag and only dropped the record.
             return {
                 "id": pin_id,
                 "deleted": True,
                 "removed_from_pinterest": False,
                 "pinterest_pin_id": None,
-                "reason": "record_only",
+                "reason": "api_version_too_old" if delete_from_pinterest else "record_only",
+                **(
+                    {
+                        "warning": (
+                            "The PinBridge API behind this server predates 1.30: the record "
+                            "was deleted but the pin is still live on Pinterest."
+                        )
+                    }
+                    if delete_from_pinterest
+                    else {}
+                ),
             }
         return response.json()
 
@@ -404,13 +475,8 @@ class PinBridgeService:
     ) -> dict[str, Any]:
         overrides = _clean({"board_id": board_id, "account_id": account_id})
         async with self.client() as client:
-            response = await client.request(
-                "POST",
-                "/v1/pins/{pin_id}/retry",
-                path_params={"pin_id": pin_id},
-                json=overrides or None,
-            )
-        return response.json()
+            pin = await client.pins.retry(pin_id, overrides or None)
+        return _dump(pin)
 
     async def get_pin_analytics(
         self,
@@ -466,7 +532,7 @@ class PinBridgeService:
                 "action": action,
                 "status": status,
                 "resource_type": resource_type,
-                "since": _parse_iso_datetime(since).isoformat() if since else None,
+                "since": _parse_iso_datetime(since, "since").isoformat() if since else None,
             }
         )
         async with self.client() as client:
@@ -493,9 +559,7 @@ class PinBridgeService:
 
     async def delete_webhook(self, webhook_id: str) -> dict[str, Any]:
         async with self.client() as client:
-            await client.request(
-                "DELETE", "/v1/webhooks/{webhook_id}", path_params={"webhook_id": webhook_id}
-            )
+            await client.webhooks.delete(webhook_id)
         return {"deleted": True, "webhook_id": webhook_id}
 
     async def get_billing_status(self) -> dict[str, Any]:
@@ -523,21 +587,19 @@ class PinBridgeService:
         link_url: str | None,
         cover_image_url: str | None,
         cover_image_asset_id: str | None,
-        idempotency_key: str | None,
     ) -> dict[str, Any]:
         return _clean(
             {
                 "account_id": account_id,
                 "board_id": board_id,
                 "title": title,
-                "run_at": _parse_iso_datetime(run_at).isoformat(),
+                "run_at": _parse_iso_datetime(run_at, "run_at").isoformat(),
                 "image_url": image_url,
                 "asset_id": asset_id,
                 "description": description,
                 "link_url": link_url,
                 "cover_image_url": cover_image_url,
                 "cover_image_asset_id": cover_image_asset_id,
-                "idempotency_key": idempotency_key,
             }
         )
 
@@ -559,7 +621,6 @@ class PinBridgeService:
         link_url: str | None = None,
         cover_image_url: str | None = None,
         cover_image_asset_id: str | None = None,
-        idempotency_key: str | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
         payload = self._schedule_payload(
@@ -573,7 +634,6 @@ class PinBridgeService:
             link_url=link_url,
             cover_image_url=cover_image_url,
             cover_image_asset_id=cover_image_asset_id,
-            idempotency_key=idempotency_key,
         )
         if dry_run:
             return await self.validate_schedule(payload)
@@ -599,8 +659,8 @@ class PinBridgeService:
                 "status": status,
                 "account_id": account_id,
                 "board_id": board_id,
-                "since": _parse_iso_datetime(since).isoformat() if since else None,
-                "until": _parse_iso_datetime(until).isoformat() if until else None,
+                "since": _parse_iso_datetime(since, "since").isoformat() if since else None,
+                "until": _parse_iso_datetime(until, "until").isoformat() if until else None,
             }
         )
         async with self.client() as client:
@@ -646,19 +706,34 @@ class PinBridgeService:
         """Render an exception as the text an MCP client shows the user.
 
         API errors carry the documented envelope: a stable ``code`` the agent can
-        branch on and a ``remediation`` sentence it can act on.
+        branch on and a ``remediation`` sentence it can act on. 401/403 go through
+        the same path so ``insufficient_scope`` / ``account_not_permitted`` keep
+        their code instead of collapsing into "authentication failed".
         """
-        if isinstance(exc, AuthenticationError):
-            return f"PinBridge authentication failed: {exc.message}"
         if isinstance(exc, APIError):
             envelope = _error_envelope(exc.details)
-            code = exc.code or envelope.get("code")
+            code = envelope.get("code") or exc.code
             message = envelope.get("message") or exc.message
             remediation = envelope.get("remediation")
+            if isinstance(exc, AuthenticationError) and exc.status_code == 401 and not code:
+                return f"PinBridge authentication failed: {message}"
             text = f"PinBridge API error ({exc.status_code})"
             if code:
                 text += f" [{code}]"
             text += f": {message}"
+            field_errors = envelope.get("errors")
+            if isinstance(field_errors, list) and field_errors:
+                rendered = []
+                for entry in field_errors[:3]:
+                    if not isinstance(entry, Mapping):
+                        continue
+                    loc = ".".join(str(part) for part in (entry.get("loc") or ()) if part != "body")
+                    rendered.append(f"{loc or 'request'}: {entry.get('msg', '')}".strip())
+                if rendered:
+                    text += " (" + "; ".join(rendered) + ")"
+            retry_after = envelope.get("retry_after_seconds")
+            if retry_after is not None:
+                text += f" Retry after {retry_after}s."
             if remediation:
                 text += f" Fix: {remediation}"
             return text
