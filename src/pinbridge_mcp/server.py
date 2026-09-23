@@ -4,17 +4,49 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
-from typing import Any, TypeVar
+from typing import Annotated, Literal, TypeVar
 from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
+from pydantic import BaseModel, Field
 
 from .config import Settings, get_settings
 from .service import PinBridgeService
 
 T = TypeVar("T")
+
+
+class PinInput(BaseModel):
+    """One entry of create_pins_batch; the same fields as create_pin."""
+
+    account_id: str = Field(description="UUID of the Pinterest account to publish from.")
+    board_id: str = Field(description="ID of the board to pin to.")
+    title: str = Field(description="Pin title (<= 100 characters).", max_length=100)
+    image_url: str | None = Field(
+        default=None, description="Public URL of the pin image (or use asset_id)."
+    )
+    asset_id: str | None = Field(
+        default=None, description="UUID of an uploaded PinBridge asset (or use image_url)."
+    )
+    description: str | None = Field(
+        default=None, description="Pin description (<= 800 characters).", max_length=800
+    )
+    related_terms: list[str] | None = Field(default=None, description="Discovery keywords.")
+    alt_text: str | None = Field(default=None, description="Accessibility text for the image.")
+    dominant_color: str | None = Field(default=None, description="Hex color, e.g. #FF5733.")
+    cover_image_url: str | None = Field(default=None, description="Video cover image URL.")
+    cover_image_asset_id: str | None = Field(default=None, description="Video cover asset UUID.")
+    link_url: str | None = Field(default=None, description="Destination URL for the pin.")
+    idempotency_key: str | None = Field(
+        default=None,
+        description=(
+            "Unique key per pin so a resend never duplicates it. Generated when omitted, "
+            "which makes the batch NOT safe to resend after a timeout."
+        ),
+    )
+
 
 # Every tool talks to the PinBridge API and, through it, Pinterest: an open world.
 READ = ToolAnnotations(
@@ -46,14 +78,19 @@ WORKFLOW (use the publish_pin prompt for the full sequence)
   1. list_pinterest_accounts()  → account_id   (also: resource pinbridge://accounts)
   2. list_boards(account_id)    → board_id     (also: pinbridge://accounts/{id}/boards)
   3. Need an image the internet cannot fetch? upload_asset(...) → asset_id
-  4. create_pin(..., dry_run=true) or validate_pin(...) to preflight for free
+  4. create_pin(..., dry_run=true) to preflight for free (nothing is published)
   5. create_pin(...) / create_schedule(...) / create_pins_batch(...)
   6. get_pin_analytics(pin_id) after publishing; update_pin / delete_pin to fix a mistake
 
 ERRORS
-  Every failure carries a stable code (board_not_found, board_not_owned,
-  token_expired, scope_missing, quota_exceeded, rate_limited, ...) and a
-  remediation sentence. Prefer check_board_access or a dry run over retrying blind.
+  Every failure carries a stable code and a remediation sentence. Two "scope"
+  codes mean different things: insufficient_scope / account_not_permitted are
+  about THIS API key's grants (ask a workspace admin for a wider key);
+  scope_missing / token_expired / token_revoked are about the connected
+  Pinterest account (reconnect it in the PinBridge dashboard). Board codes:
+  board_not_found, board_not_owned, board_deleted, board_access_denied. Others:
+  quota_exceeded, rate_limited (has retry_after_seconds), validation_error.
+  Prefer a dry run (or check_board_access after a board failure) over retrying blind.
 
 WRITE TOOLS
   upload_asset, create_pin, create_pins_batch, update_pin, delete_pin, retry_pin,
@@ -71,8 +108,9 @@ PUBLISH_PIN_STEPS = """Publish one pin with PinBridge, in this order:
    list_pinterest_accounts) and pick one.
 2. If no board_id is known, read pinbridge://accounts/{account_id}/boards (or call
    list_boards).
-3. Confirm the board is publishable with check_board_access(account_id, board_id).
-   If it is not, follow the remediation in the response instead of retrying.
+3. If the board was not used recently or a previous publish to it failed, call
+   check_board_access(account_id, board_id) and follow its remediation instead of
+   retrying; otherwise the dry run in step 6 covers this check.
 4. Media: if the image is a public URL, pass it as image_url. If you generated the
    image or it is not publicly fetchable, call upload_asset (content_base64 or
    source_url) and use the returned id as asset_id.
@@ -80,10 +118,13 @@ PUBLISH_PIN_STEPS = """Publish one pin with PinBridge, in this order:
    keywords), link_url and alt_text.
 6. Run create_pin with dry_run=true. Show the resolved payload and every check to
    the user and stop if any check failed.
-7. Only after the user confirms, call create_pin (same arguments, dry_run=false).
-   Keep the idempotency_key so a retry never duplicates the pin.
-8. Poll get_pin until status is published or failed. On failure, read
-   error_code/error_message; retry_pin can move it to another board or account.
+7. Only after the user confirms, call create_pin with the same arguments plus
+   idempotency_key=resolved.idempotency_key from the dry run, and dry_run=false.
+   Reuse that key on any retry so the pin is never duplicated.
+8. Poll get_pin until status is published, failed or deferred. deferred means
+   PinBridge is pacing the publish (quota or rate limit); report error_code and
+   wait rather than resubmitting. On failed, read error_code/error_message;
+   retry_pin can move it to another board or account.
 9. Later, get_pin_analytics(pin_id) reports impressions, saves and clicks. A wrong
    pin is fixed with update_pin (title/description/link/alt_text/board) or
    delete_pin, never by deleting the board."""
@@ -148,7 +189,15 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
     # ------------------------------------------------------------------ prompts
 
     @mcp.prompt(name="publish_pin", title="Publish a pin end to end")
-    def publish_pin_prompt(goal: str = "", account_id: str = "", board_id: str = "") -> str:
+    def publish_pin_prompt(
+        goal: Annotated[
+            str, Field(description="What the pin should achieve, in the user's words.")
+        ] = "",
+        account_id: Annotated[
+            str, Field(description="Pinterest account UUID, if already chosen.")
+        ] = "",
+        board_id: Annotated[str, Field(description="Board ID, if already chosen.")] = "",
+    ) -> str:
         """Step-by-step sequence for publishing one pin safely.
 
         Covers upload, validate, publish and measure, in that order.
@@ -170,8 +219,8 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         """Return server configuration, auth details and capabilities.
 
         Use this to confirm the server is reachable, check which PinBridge API
-        endpoint it targets, whether write tools are enabled, and which
-        resources and prompts exist.
+        endpoint it targets and whether write tools are enabled. Resources and
+        prompts are discoverable through the standard list calls.
         """
         return await service.server_info()
 
@@ -353,51 +402,6 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         )
 
     @mcp.tool(annotations=READ)
-    async def validate_pin(
-        account_id: str,
-        board_id: str,
-        title: str,
-        image_url: str | None = None,
-        asset_id: str | None = None,
-        description: str | None = None,
-        related_terms: list[str] | None = None,
-        alt_text: str | None = None,
-        dominant_color: str | None = None,
-        cover_image_url: str | None = None,
-        cover_image_asset_id: str | None = None,
-        link_url: str | None = None,
-        idempotency_key: str | None = None,
-    ) -> dict:
-        """Dry-run a pin: run every check create_pin would run and publish nothing.
-
-        Same arguments as create_pin. Reports account, media, cover image, board
-        access, idempotency, billing, quota and rate headroom as individual
-        checks, plus the exact payload that would be published.
-
-        Returns a dict with keys: valid (bool), checks (list of {name, status,
-        code, message, remediation}), resolved (payload), existing_pin_id,
-        headroom.
-        """
-        return await guarded(
-            lambda: service.create_pin(
-                account_id=account_id,
-                board_id=board_id,
-                title=title,
-                image_url=image_url,
-                asset_id=asset_id,
-                description=description,
-                related_terms=related_terms,
-                alt_text=alt_text,
-                dominant_color=dominant_color,
-                cover_image_url=cover_image_url,
-                cover_image_asset_id=cover_image_asset_id,
-                link_url=link_url,
-                idempotency_key=idempotency_key,
-                dry_run=True,
-            )
-        )
-
-    @mcp.tool(annotations=READ)
     async def list_activity_logs(
         limit: int = 20,
         cursor: str | None = None,
@@ -518,7 +522,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         content_base64: str | None = None,
         source_url: str | None = None,
         content_type: str | None = None,
-        media_type: str = "image",
+        asset_type: Literal["image", "video"] = "image",
     ) -> dict:
         """Upload an image or video to PinBridge and get an asset_id for create_pin.
 
@@ -531,7 +535,10 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             content_base64: Base64-encoded file content.
             source_url:     URL to download the file from instead.
             content_type:   MIME type (e.g. "image/png"); inferred when omitted.
-            media_type:     "image" (default) or "video".
+            asset_type:     "image" (default) or "video".
+
+        source_url must be a public http(s) URL with no redirects; private
+        hosts are refused. Files are capped at 200 MB (plans cap lower).
 
         Returns the asset dict with keys: id (use as asset_id), public_url,
         asset_type, content_type, size_bytes, created_at. Uploads require a
@@ -543,11 +550,11 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
                 content_base64=content_base64,
                 source_url=source_url,
                 content_type=content_type,
-                media_type=media_type,
+                asset_type=asset_type,
             )
         )
 
-    @mcp.tool(annotations=WRITE)
+    @mcp.tool(annotations=WRITE_NON_IDEMPOTENT)
     async def create_pin(
         account_id: str,
         board_id: str,
@@ -584,7 +591,8 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             cover_image_asset_id:  Cover image asset UUID (video pins only).
             link_url:              Destination URL when users click the pin.
             idempotency_key:       Unique key so a retry never duplicates the pin.
-                                   Auto-generated if omitted; reuse it on retries.
+                                   Generated if omitted (then a repeat call
+                                   publishes again); reuse it on retries.
             dry_run:               Validate and return the checks and resolved
                                    payload without publishing.
 
@@ -610,14 +618,16 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool(annotations=WRITE)
-    async def create_pins_batch(pins: list[dict[str, Any]]) -> dict:
+    @mcp.tool(annotations=WRITE_NON_IDEMPOTENT)
+    async def create_pins_batch(pins: list[PinInput]) -> dict:
         """Publish several pins in one call with a per-entry outcome.
 
-        Each entry takes the same fields as create_pin (account_id, board_id,
-        title, image_url or asset_id, description, link_url, ...). Missing
-        idempotency keys are generated. Requires the bulk publishing plan
-        feature and enough monthly quota for every entry that would be created.
+        Each entry takes the same fields as create_pin. Supply an
+        idempotency_key per entry if you may need to resend the batch; keys are
+        generated when omitted, and a resend then creates every pin again.
+        Requires the bulk imports plan feature (`bulk_imports` in
+        get_billing_status) and enough monthly quota for every entry that would
+        be created.
 
         Args:
             pins: List of pin objects (max 100).
@@ -625,7 +635,11 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         Returns a dict with keys: created_count, existing_count, failed_count,
         results (list of {index, idempotency_key, status, pin, error}), headroom.
         """
-        return await guarded(lambda: service.create_pins_batch(pins))
+        return await guarded(
+            lambda: service.create_pins_batch(
+                [entry.model_dump(exclude_none=True) for entry in pins]
+            )
+        )
 
     @mcp.tool(annotations=WRITE)
     async def update_pin(
@@ -705,7 +719,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             lambda: service.retry_pin(pin_id, board_id=board_id, account_id=account_id)
         )
 
-    @mcp.tool(annotations=WRITE)
+    @mcp.tool(annotations=WRITE_NON_IDEMPOTENT)
     async def create_schedule(
         account_id: str,
         board_id: str,
@@ -717,13 +731,13 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         link_url: str | None = None,
         cover_image_url: str | None = None,
         cover_image_asset_id: str | None = None,
-        idempotency_key: str | None = None,
         dry_run: bool = False,
     ) -> dict:
         """Schedule a pin for future publishing at a specific time.
 
         The board is preflighted at scheduling time. Provide either image_url or
-        asset_id, not both.
+        asset_id, not both. A repeat call creates a second schedule; check
+        list_schedules before resending after a timeout.
 
         Args:
             account_id:            UUID of the Pinterest account.
@@ -737,7 +751,6 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             link_url:              Destination URL (<= 2048 characters).
             cover_image_url:       Custom video cover image URL.
             cover_image_asset_id:  Custom video cover image asset UUID.
-            idempotency_key:       Optional unique key to prevent duplicates.
             dry_run:               Validate (including run_at) without scheduling.
 
         Returns the created schedule dict with status "scheduled", or the
@@ -755,7 +768,6 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
                 link_url=link_url,
                 cover_image_url=cover_image_url,
                 cover_image_asset_id=cover_image_asset_id,
-                idempotency_key=idempotency_key,
                 dry_run=dry_run,
             )
         )
@@ -778,7 +790,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         account_id: str,
         name: str,
         description: str | None = None,
-        privacy: str | None = None,
+        privacy: Literal["PUBLIC", "SECRET"] | None = None,
     ) -> dict:
         """Create a new Pinterest board on a connected account.
 

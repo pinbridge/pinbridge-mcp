@@ -2,12 +2,12 @@
 
 `pinbridge-mcp` is a remote-capable MCP server for PinBridge.
 
-The first version is intentionally narrow:
+What it provides:
 
-- HTTP transport for `mcp.pinbridge.io`
+- HTTP transport for `mcp.pinbridge.io` (streamable HTTP, stateless)
 - `stdio` transport for local development
-- bearer API-key passthrough for remote access
-- read-focused tools over the existing PinBridge API-key surface
+- bearer API-key passthrough, plus the built-in OAuth flow for clients such as Claude
+- the full publish loop: upload → dry run → publish → measure → edit/delete
 
 This server is workspace-scoped. A PinBridge API key resolves to one workspace, so project switching is out of scope for the API-key transport.
 
@@ -18,14 +18,13 @@ Read tools (always registered):
 - `server_info`, `list_pinterest_accounts`, `list_boards`, `check_board_access`
 - `list_related_terms`, `list_pins` (filters: account, board, status, error code, since/until), `get_pin`
 - `get_pin_analytics`, `get_account_analytics`
-- `validate_pin` (dry run: every check `create_pin` runs, nothing published)
 - `list_activity_logs`, `list_webhooks`, `get_billing_status`, `get_rate_meter`
 - `list_schedules` (server-side filters), `get_schedule`
 
 Write tools (registered when `PINBRIDGE_MCP_ENABLE_WRITE_TOOLS=true`):
 
 - `upload_asset` (base64 or a URL this server can download; returns an `asset_id`)
-- `create_pin` and `create_schedule` (both take `dry_run`), `create_pins_batch`
+- `create_pin` and `create_schedule` (both take `dry_run`: every check the API runs, nothing published), `create_pins_batch`
 - `update_pin`, `delete_pin` (Pinterest-side by default), `retry_pin`
 - `cancel_schedule`, `create_board`, `delete_board`, `create_webhook`, `delete_webhook`
 
@@ -33,7 +32,7 @@ Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempote
 
 Resources: `pinbridge://accounts` and `pinbridge://accounts/{account_id}/boards`. Prompt: `publish_pin` (upload → validate → publish → measure).
 
-Requires PinBridge API ≥ 1.30 for `check_board_access`, `validate_pin`, `update_pin`, `delete_pin`, analytics, batch and the list filters. Those calls use the SDK's raw `request`; typed SDK methods follow (see `roadmap/SDK_Roadmap_Sept2026.md` in the workspace).
+Requires PinBridge API ≥ 1.30 for `check_board_access`, `update_pin`, `delete_pin`, `dry_run`, analytics, batch and the list filters. Against an older API those tools fail with `PinBridge API error (404): Not Found`, and `delete_pin` reports `reason: api_version_too_old` (record deleted, pin still live on Pinterest). Those calls use the SDK's raw `request`; typed SDK methods follow (see `roadmap/SDK_Roadmap_Sept2026.md` in the workspace).
 
 ## Auth Model
 
@@ -100,7 +99,6 @@ Notes:
 - keep the streamable HTTP endpoint at `/`
 - keep `/healthz` unauthenticated for probes
 - treat this as a stateless edge service
-- add OAuth later if you want broader automatic client auth compatibility
 
 ## Docker
 
