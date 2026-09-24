@@ -167,6 +167,8 @@ WORKFLOW (use the publish_pin prompt for the full sequence)
   4. create_pin(..., dry_run=true) to preflight for free (nothing is published)
   5. create_pin(...) / create_schedule(...) / create_pins_batch(...)
   6. get_pin_analytics(pin_id) after publishing; update_pin / delete_pin to fix a mistake
+  7. Wrong time or board on a pending schedule? update_schedule(...) edits it in place;
+     never cancel + recreate for a small fix
 
 ACCOUNTS
   Connecting or disconnecting a Pinterest account is deliberately dashboard-only
@@ -187,9 +189,9 @@ ERRORS
 
 WRITE TOOLS
   upload_asset, create_pin, create_pins_batch, update_pin, delete_pin, retry_pin,
-  create_schedule, cancel_schedule, retry_schedule, delete_schedule, create_board,
-  delete_board, create_webhook, update_webhook, delete_webhook are only
-  registered when the server has write tools enabled.
+  create_schedule, update_schedule, cancel_schedule, retry_schedule, delete_schedule,
+  create_board, update_board, delete_board, create_webhook, update_webhook,
+  delete_webhook are only registered when the server has write tools enabled.
 
 PLAN GATE
   The server may require a minimum plan. If your request is rejected with a
@@ -926,6 +928,58 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         )
 
     @mcp.tool(annotations=WRITE)
+    async def update_schedule(
+        schedule_id: ScheduleId,
+        run_at: Annotated[
+            str | None,
+            Field(description="New publish time, ISO 8601 with timezone, in the future."),
+        ] = None,
+        board_id: OptionalBoardId = None,
+        title: OptionalTitle = None,
+        description: Description = None,
+        link_url: LinkUrl = None,
+        image_url: Annotated[
+            str | None,
+            Field(description="Replace the media with this public URL (drops any asset_id)."),
+        ] = None,
+        asset_id: Annotated[
+            str | None,
+            Field(description="Replace the media with this uploaded asset (drops any image_url)."),
+        ] = None,
+        cover_image_url: CoverImageUrl = None,
+        cover_image_asset_id: CoverImageAssetId = None,
+    ) -> dict:
+        """Edit a pending schedule in place: time, board, text or media.
+
+        Use to fix a wrong run_at, board, title or link on a schedule that has
+        not started publishing, instead of cancel_schedule plus
+        create_schedule; the id and history are kept. Once the schedule has
+        run, edit the resulting pin with update_pin; for a failed one use
+        retry_schedule. Pass at least one field.
+
+        Returns the updated schedule, still in status "scheduled". A new board
+        is preflighted like create_schedule. Fails with not_found for an
+        unknown id, schedule_not_editable (409) once publishing started, with a
+        remediation naming the right tool, validation_error for a past or
+        timezone-less run_at, and sandbox_board_fixed when changing the board
+        of a sandbox schedule.
+        """
+        return await guarded(
+            lambda: service.update_schedule(
+                schedule_id,
+                run_at=run_at,
+                board_id=board_id,
+                title=title,
+                description=description,
+                link_url=link_url,
+                image_url=image_url,
+                asset_id=asset_id,
+                cover_image_url=cover_image_url,
+                cover_image_asset_id=cover_image_asset_id,
+            )
+        )
+
+    @mcp.tool(annotations=WRITE)
     async def cancel_schedule(schedule_id: ScheduleId) -> dict:
         """Cancel a pending scheduled pin so it never publishes.
 
@@ -994,6 +1048,39 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         return await guarded(
             lambda: service.create_board(
                 account_id=account_id, name=name, description=description, privacy=privacy
+            )
+        )
+
+    @mcp.tool(annotations=WRITE)
+    async def update_board(
+        board_id: BoardId,
+        account_id: AccountId,
+        name: Annotated[
+            str | None, Field(description="New board name, unique within the account.")
+        ] = None,
+        description: Annotated[str | None, Field(description="New board description.")] = None,
+        privacy: Annotated[
+            Literal["PUBLIC", "SECRET"] | None, Field(description='"PUBLIC" or "SECRET".')
+        ] = None,
+    ) -> dict:
+        """Rename a board or change its description or privacy on Pinterest.
+
+        Use for board housekeeping; pins on the board are untouched. To move a
+        pin between boards use update_pin; to remove a board use delete_board.
+        Pass at least one of name, description or privacy.
+
+        Returns the updated board (id, name, description, privacy). Fails with
+        board_not_found for an unknown board, forbidden when sandbox board
+        writes are blocked, and token_expired / scope_missing when the
+        Pinterest connection needs a reconnect.
+        """
+        return await guarded(
+            lambda: service.update_board(
+                board_id,
+                account_id=account_id,
+                name=name,
+                description=description,
+                privacy=privacy,
             )
         )
 
