@@ -39,8 +39,8 @@ Write tools (registered when `PINBRIDGE_MCP_ENABLE_WRITE_TOOLS=true`):
 |---|---|
 | Media | `upload_asset` (base64 or a public URL the server downloads; returns an `asset_id`) |
 | Pins | `create_pin` (`dry_run` runs every API check, publishes nothing), `create_pins_batch`, `update_pin`, `delete_pin` (Pinterest-side by default), `retry_pin` |
-| Schedules | `create_schedule` (`dry_run`), `cancel_schedule`, `retry_schedule` (failed → scheduled), `delete_schedule` (finished schedules only) |
-| Boards | `create_board`, `delete_board` |
+| Schedules | `create_schedule` (`dry_run`), `update_schedule` (edit a pending schedule in place), `cancel_schedule`, `retry_schedule` (failed → scheduled), `delete_schedule` (finished schedules only) |
+| Boards | `create_board`, `update_board` (name / description / privacy), `delete_board` |
 | Webhooks | `create_webhook`, `update_webhook` (partial; pause with `is_enabled=false`), `delete_webhook` |
 
 Every tool carries `readOnlyHint`, `destructiveHint` and `idempotentHint`, so a client can decide what needs a confirmation. Creates that mint their own idempotency key are marked non-idempotent; pass `idempotency_key` yourself to make a retry safe.
@@ -58,7 +58,7 @@ Other codes: `board_not_found`, `board_not_owned`, `board_deleted`, `board_acces
 
 ### API version
 
-Requires PinBridge API ≥ 1.30. Against an older API, `check_board_access`, `update_pin`, `delete_pin`, `dry_run`, analytics, batch and the list filters fail with `PinBridge API error (404): Not Found`, and `delete_pin` reports `reason: api_version_too_old` (record deleted, pin still live on Pinterest).
+Requires PinBridge API ≥ 1.31 for `update_schedule` and `update_board`, and ≥ 1.30 otherwise. Against an older API, `check_board_access`, `update_pin`, `delete_pin`, `dry_run`, analytics, batch and the list filters fail with `PinBridge API error (404): Not Found`, and `delete_pin` reports `reason: api_version_too_old` (record deleted, pin still live on Pinterest).
 
 ## Auth
 

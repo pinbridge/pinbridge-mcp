@@ -32,10 +32,12 @@ WRITE_TOOLS = {
     "delete_pin",
     "retry_pin",
     "create_schedule",
+    "update_schedule",
     "cancel_schedule",
     "retry_schedule",
     "delete_schedule",
     "create_board",
+    "update_board",
     "delete_board",
     "create_webhook",
     "update_webhook",
@@ -74,7 +76,7 @@ def test_write_server_registers_every_roadmap_tool_with_annotations() -> None:
     for name in ("create_pin", "create_pins_batch", "create_schedule", "upload_asset"):
         assert tools[name].annotations.idempotentHint is False, name
     assert tools["update_pin"].annotations.idempotentHint is True
-    for name in ("retry_schedule", "update_webhook"):
+    for name in ("retry_schedule", "update_webhook", "update_schedule", "update_board"):
         assert tools[name].annotations.idempotentHint is True, name
 
 

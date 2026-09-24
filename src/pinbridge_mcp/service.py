@@ -695,6 +695,46 @@ class PinBridgeService:
             schedule = await client.schedules.cancel(schedule_id)
         return _dump(schedule)
 
+    async def update_schedule(
+        self,
+        schedule_id: str,
+        *,
+        run_at: str | None = None,
+        board_id: str | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        link_url: str | None = None,
+        image_url: str | None = None,
+        asset_id: str | None = None,
+        cover_image_url: str | None = None,
+        cover_image_asset_id: str | None = None,
+    ) -> dict[str, Any]:
+        payload = _clean(
+            {
+                "run_at": _parse_iso_datetime(run_at, "run_at").isoformat() if run_at else None,
+                "board_id": board_id,
+                "title": title,
+                "description": description,
+                "link_url": link_url,
+                "image_url": image_url,
+                "asset_id": asset_id,
+                "cover_image_url": cover_image_url,
+                "cover_image_asset_id": cover_image_asset_id,
+            }
+        )
+        if not payload:
+            raise ValueError("Provide at least one field to update")
+        if image_url and asset_id:
+            raise ValueError("Provide either image_url or asset_id, not both")
+        async with self.client() as client:
+            response = await client.request(
+                "PATCH",
+                "/v1/schedules/{schedule_id}",
+                path_params={"schedule_id": schedule_id},
+                json=payload,
+            )
+        return response.json()
+
     async def retry_schedule(self, schedule_id: str) -> dict[str, Any]:
         async with self.client() as client:
             schedule = await client.schedules.retry(schedule_id)
@@ -721,6 +761,34 @@ class PinBridgeService:
         async with self.client() as client:
             board = await client.pinterest.create_board(payload)
         return _dump(board)
+
+    async def update_board(
+        self,
+        board_id: str,
+        *,
+        account_id: str,
+        name: str | None = None,
+        description: str | None = None,
+        privacy: str | None = None,
+    ) -> dict[str, Any]:
+        payload = _clean(
+            {
+                "account_id": account_id,
+                "name": name,
+                "description": description,
+                "privacy": privacy,
+            }
+        )
+        if len(payload) == 1:
+            raise ValueError("Provide at least one of name, description or privacy")
+        async with self.client() as client:
+            response = await client.request(
+                "PATCH",
+                "/v1/pinterest/boards/{board_id}",
+                path_params={"board_id": board_id},
+                json=payload,
+            )
+        return response.json()
 
     async def delete_board(self, board_id: str, *, account_id: str) -> dict[str, Any]:
         async with self.client() as client:
