@@ -1,5 +1,7 @@
 # PinBridge MCP
 
+[![pinbridge MCP connector – tool definition quality and endpoint health on Glama](https://glama.ai/mcp/connectors/io.pinbridge/pinbridge/badges/score.svg)](https://glama.ai/mcp/connectors/io.pinbridge/pinbridge)
+
 `pinbridge-mcp` is a remote-capable MCP server for PinBridge.
 
 What it provides:
