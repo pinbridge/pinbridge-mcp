@@ -78,6 +78,33 @@ def test_write_server_registers_every_roadmap_tool_with_annotations() -> None:
         assert tools[name].annotations.idempotentHint is True, name
 
 
+def test_every_parameter_has_a_schema_description() -> None:
+    """Glama's TDQS scores schema-level parameter descriptions; keep coverage at 100%."""
+    tools = _tools(enable_write_tools=True)
+    missing = [
+        f"{name}.{param}"
+        for name, tool in tools.items()
+        for param, spec in tool.inputSchema.get("properties", {}).items()
+        if not spec.get("description")
+    ]
+    assert missing == []
+
+
+def test_descriptions_name_a_sibling_and_a_failure_mode() -> None:
+    """Each description says when to use another tool and what a failure looks like."""
+    tools = _tools(enable_write_tools=True)
+    problems: list[str] = []
+    for name, tool in tools.items():
+        text = tool.description or ""
+        if "Use " not in text:
+            problems.append(f"{name}: no usage guidance")
+        if not any(other != name and other in text for other in tools):
+            problems.append(f"{name}: names no sibling tool")
+        if not any(word in text for word in ("Fails", "fails", "Never fails", "Never raises")):
+            problems.append(f"{name}: says nothing about failure")
+    assert problems == []
+
+
 def test_update_webhook_fields_are_all_optional() -> None:
     tools = _tools(enable_write_tools=True)
     schema = tools["update_webhook"].inputSchema
