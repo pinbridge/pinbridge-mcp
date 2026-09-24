@@ -174,6 +174,16 @@ class _FakeClient:
             return _FakeResponse({"valid": False, "dry_run": True, "checks": [{"name": "run_at"}]})
         if path == "/v1/pins/batch":
             return _FakeResponse({"created_count": len(kwargs["json"]["pins"]), "results": []})
+        if path == "/v1/schedules/{schedule_id}" and method == "PATCH":
+            return _FakeResponse(
+                {
+                    "id": kwargs["path_params"]["schedule_id"],
+                    "status": "scheduled",
+                    **kwargs["json"],
+                }
+            )
+        if path == "/v1/pinterest/boards/{board_id}" and method == "PATCH":
+            return _FakeResponse({"id": kwargs["path_params"]["board_id"], **kwargs["json"]})
         if path == "/v1/pins/{pin_id}" and method == "PATCH":
             return _FakeResponse({"id": kwargs["path_params"]["pin_id"], **kwargs["json"]})
         if path == "/v1/pins/{pin_id}" and method == "DELETE":
@@ -557,6 +567,39 @@ def test_webhook_update_rejects_empty_change() -> None:
     service = _service()
     with pytest.raises(ValueError, match="at least one"):
         asyncio.run(service.update_webhook("webhook_1"))
+
+
+def test_update_schedule_sends_only_given_fields_and_normalizes_run_at() -> None:
+    service = _service()
+
+    async def run() -> None:
+        updated = await service.update_schedule(
+            "sched_1", run_at="2030-01-01T10:00:00+02:00", title="Moved"
+        )
+        assert updated["id"] == "sched_1"
+        sent = _FakeClient.instances[-1].requests[-1]
+        assert sent["method"] == "PATCH"
+        assert sent["json"] == {"run_at": "2030-01-01T10:00:00+02:00", "title": "Moved"}
+
+    asyncio.run(run())
+    with pytest.raises(ValueError, match="at least one"):
+        asyncio.run(service.update_schedule("sched_1"))
+    with pytest.raises(ValueError, match="not both"):
+        asyncio.run(service.update_schedule("sched_1", image_url="https://x/a.png", asset_id="a"))
+    with pytest.raises(ValueError, match="run_at"):
+        asyncio.run(service.update_schedule("sched_1", run_at="tomorrow"))
+
+
+def test_update_board_requires_a_change() -> None:
+    service = _service()
+
+    async def run() -> None:
+        updated = await service.update_board("board_1", account_id="acct_1", name="Renamed")
+        assert updated == {"id": "board_1", "account_id": "acct_1", "name": "Renamed"}
+
+    asyncio.run(run())
+    with pytest.raises(ValueError, match="at least one"):
+        asyncio.run(service.update_board("board_1", account_id="acct_1"))
 
 
 def test_schedule_retry_and_delete() -> None:
