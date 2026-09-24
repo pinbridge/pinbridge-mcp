@@ -82,6 +82,13 @@ WORKFLOW (use the publish_pin prompt for the full sequence)
   5. create_pin(...) / create_schedule(...) / create_pins_batch(...)
   6. get_pin_analytics(pin_id) after publishing; update_pin / delete_pin to fix a mistake
 
+ACCOUNTS
+  Connecting or disconnecting a Pinterest account is deliberately dashboard-only
+  (https://app.pinbridge.io): connecting needs a person to approve Pinterest's
+  OAuth grant in a browser, and disconnecting drops every pending schedule on
+  the account. When a call fails with token_expired, token_revoked or
+  scope_missing, tell the user to reconnect the account in the dashboard.
+
 ERRORS
   Every failure carries a stable code and a remediation sentence. Two "scope"
   codes mean different things: insufficient_scope / account_not_permitted are
@@ -94,8 +101,9 @@ ERRORS
 
 WRITE TOOLS
   upload_asset, create_pin, create_pins_batch, update_pin, delete_pin, retry_pin,
-  create_schedule, cancel_schedule, create_board, delete_board, create_webhook,
-  delete_webhook are only registered when the server has write tools enabled.
+  create_schedule, cancel_schedule, retry_schedule, delete_schedule, create_board,
+  delete_board, create_webhook, update_webhook, delete_webhook are only
+  registered when the server has write tools enabled.
 
 PLAN GATE
   The server may require a minimum plan. If your request is rejected with a
@@ -785,6 +793,37 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         """
         return await guarded(lambda: service.cancel_schedule(schedule_id))
 
+    @mcp.tool(annotations=WRITE)
+    async def retry_schedule(schedule_id: str) -> dict:
+        """Re-queue a schedule whose publish failed.
+
+        Only schedules in "failed" status can be retried. The schedule (and its
+        linked pin, if any) goes back to "scheduled"; a run_at already in the
+        past publishes at the next worker tick. To change the board or account
+        first, use retry_pin on the linked pin_id instead.
+
+        Args:
+            schedule_id: UUID of the failed schedule (from list_schedules with
+                         status="failed").
+
+        Returns the updated schedule dict with status "scheduled".
+        """
+        return await guarded(lambda: service.retry_schedule(schedule_id))
+
+    @mcp.tool(annotations=DESTRUCTIVE)
+    async def delete_schedule(schedule_id: str) -> dict:
+        """Delete a finished schedule record (status done, failed or canceled).
+
+        A pending schedule cannot be deleted: cancel_schedule it first. Deleting
+        does not touch the pin that a done schedule already published. Irreversible.
+
+        Args:
+            schedule_id: UUID of the schedule to delete.
+
+        Returns {"deleted": true, "schedule_id": "<id>"} on success.
+        """
+        return await guarded(lambda: service.delete_schedule(schedule_id))
+
     @mcp.tool(annotations=WRITE_NON_IDEMPOTENT)
     async def create_board(
         account_id: str,
@@ -844,6 +883,34 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         return await guarded(
             lambda: service.create_webhook(
                 url=url, secret=secret, events=events, is_enabled=is_enabled
+            )
+        )
+
+    @mcp.tool(annotations=WRITE)
+    async def update_webhook(
+        webhook_id: str,
+        url: str | None = None,
+        secret: str | None = None,
+        events: list[str] | None = None,
+        is_enabled: bool | None = None,
+    ) -> dict:
+        """Change a webhook's URL, secret, events or enabled flag.
+
+        Only the fields you pass change; omitted fields keep their value. Use
+        is_enabled=false to pause deliveries without losing the registration.
+
+        Args:
+            webhook_id: UUID of the webhook (from list_webhooks).
+            url:        New HTTPS endpoint.
+            secret:     New signing secret (>= 16 characters).
+            events:     Replacement event list, e.g. ["pin.published", "pin.failed"].
+            is_enabled: Pause (false) or resume (true) deliveries.
+
+        Returns the updated webhook dict with keys: id, url, events, is_enabled.
+        """
+        return await guarded(
+            lambda: service.update_webhook(
+                webhook_id, url=url, secret=secret, events=events, is_enabled=is_enabled
             )
         )
 
