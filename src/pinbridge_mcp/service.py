@@ -557,6 +557,24 @@ class PinBridgeService:
             webhook = await client.webhooks.create(payload)
         return _dump(webhook)
 
+    async def update_webhook(
+        self,
+        webhook_id: str,
+        *,
+        url: str | None = None,
+        secret: str | None = None,
+        events: list[str] | None = None,
+        is_enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        payload = _clean({"url": url, "secret": secret, "events": events, "is_enabled": is_enabled})
+        if not payload:
+            raise ValueError(
+                "update_webhook needs at least one of url, secret, events or is_enabled."
+            )
+        async with self.client() as client:
+            webhook = await client.webhooks.update(webhook_id, payload)
+        return _dump(webhook)
+
     async def delete_webhook(self, webhook_id: str) -> dict[str, Any]:
         async with self.client() as client:
             await client.webhooks.delete(webhook_id)
@@ -676,6 +694,16 @@ class PinBridgeService:
         async with self.client() as client:
             schedule = await client.schedules.cancel(schedule_id)
         return _dump(schedule)
+
+    async def retry_schedule(self, schedule_id: str) -> dict[str, Any]:
+        async with self.client() as client:
+            schedule = await client.schedules.retry(schedule_id)
+        return _dump(schedule)
+
+    async def delete_schedule(self, schedule_id: str) -> dict[str, Any]:
+        async with self.client() as client:
+            await client.schedules.delete(schedule_id)
+        return {"deleted": True, "schedule_id": schedule_id}
 
     # ------------------------------------------------------------------ boards
 
