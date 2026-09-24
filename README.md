@@ -26,9 +26,12 @@ Write tools (registered when `PINBRIDGE_MCP_ENABLE_WRITE_TOOLS=true`):
 - `upload_asset` (base64 or a URL this server can download; returns an `asset_id`)
 - `create_pin` and `create_schedule` (both take `dry_run`: every check the API runs, nothing published), `create_pins_batch`
 - `update_pin`, `delete_pin` (Pinterest-side by default), `retry_pin`
-- `cancel_schedule`, `create_board`, `delete_board`, `create_webhook`, `delete_webhook`
+- `cancel_schedule`, `retry_schedule` (failed → scheduled), `delete_schedule` (terminal schedules only)
+- `create_board`, `delete_board`, `create_webhook`, `update_webhook` (partial: pause with `is_enabled=false`), `delete_webhook`
 
 Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`), so clients can decide what needs a confirmation. Errors surface the API's stable `code` and `remediation`, e.g. `PinBridge API error (422) [board_not_found]: ... Fix: ...`.
+
+Connecting or disconnecting a Pinterest account is deliberately not exposed: connecting needs a person to approve Pinterest's OAuth grant in a browser, and disconnecting drops every pending schedule on the account. Both live in the dashboard, and the server instructions tell agents so.
 
 Resources: `pinbridge://accounts` and `pinbridge://accounts/{account_id}/boards`. Prompt: `publish_pin` (upload → validate → publish → measure).
 

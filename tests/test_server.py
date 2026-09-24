@@ -33,12 +33,15 @@ WRITE_TOOLS = {
     "retry_pin",
     "create_schedule",
     "cancel_schedule",
+    "retry_schedule",
+    "delete_schedule",
     "create_board",
     "delete_board",
     "create_webhook",
+    "update_webhook",
     "delete_webhook",
 }
-DESTRUCTIVE_TOOLS = {"delete_pin", "delete_board", "delete_webhook"}
+DESTRUCTIVE_TOOLS = {"delete_pin", "delete_board", "delete_webhook", "delete_schedule"}
 
 
 def _tools(enable_write_tools: bool) -> dict[str, object]:
@@ -71,6 +74,20 @@ def test_write_server_registers_every_roadmap_tool_with_annotations() -> None:
     for name in ("create_pin", "create_pins_batch", "create_schedule", "upload_asset"):
         assert tools[name].annotations.idempotentHint is False, name
     assert tools["update_pin"].annotations.idempotentHint is True
+    for name in ("retry_schedule", "update_webhook"):
+        assert tools[name].annotations.idempotentHint is True, name
+
+
+def test_update_webhook_fields_are_all_optional() -> None:
+    tools = _tools(enable_write_tools=True)
+    schema = tools["update_webhook"].inputSchema
+    assert schema["required"] == ["webhook_id"]
+    assert {"url", "secret", "events", "is_enabled"} <= set(schema["properties"])
+
+
+def test_instructions_state_account_linking_is_dashboard_only() -> None:
+    mcp = create_mcp_server(Settings(pinbridge_api_key="pb_local"))
+    assert "dashboard-only" in (mcp.instructions or "")
 
 
 def test_create_pin_and_schedule_expose_dry_run() -> None:
