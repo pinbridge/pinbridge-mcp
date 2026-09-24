@@ -88,12 +88,17 @@ class _FakeAssets:
 class _FakeWebhooks:
     def __init__(self) -> None:
         self.deleted: list[str] = []
+        self.updated: list[tuple[str, dict]] = []
 
     async def list(self) -> list[_FakeModel]:
         return [_FakeModel({"id": "webhook_1", "url": "https://example.com/webhook"})]
 
     async def create(self, payload: dict) -> _FakeModel:
         return _FakeModel({"id": "webhook_new", **payload})
+
+    async def update(self, webhook_id: str, payload: dict) -> _FakeModel:
+        self.updated.append((webhook_id, payload))
+        return _FakeModel({"id": webhook_id, **payload})
 
     async def delete(self, webhook_id: str) -> None:
         self.deleted.append(webhook_id)
@@ -110,6 +115,10 @@ class _FakeRateMeter:
 
 
 class _FakeSchedules:
+    def __init__(self) -> None:
+        self.retried: list[str] = []
+        self.deleted: list[str] = []
+
     async def create(self, payload: dict) -> _FakeModel:
         return _FakeModel({"id": "sched_new", "status": "scheduled", **payload})
 
@@ -118,6 +127,13 @@ class _FakeSchedules:
 
     async def cancel(self, schedule_id: str) -> _FakeModel:
         return _FakeModel({"id": schedule_id, "status": "canceled"})
+
+    async def retry(self, schedule_id: str) -> _FakeModel:
+        self.retried.append(schedule_id)
+        return _FakeModel({"id": schedule_id, "status": "scheduled"})
+
+    async def delete(self, schedule_id: str) -> None:
+        self.deleted.append(schedule_id)
 
 
 class _FakeClient:
@@ -522,6 +538,37 @@ def test_webhook_create_and_delete() -> None:
         deleted = await service.delete_webhook("webhook_1")
         assert deleted == {"deleted": True, "webhook_id": "webhook_1"}
         assert _FakeClient.instances[-1].webhooks.deleted == ["webhook_1"]
+
+    asyncio.run(run())
+
+
+def test_webhook_update_sends_only_given_fields() -> None:
+    service = _service()
+
+    async def run() -> None:
+        updated = await service.update_webhook("webhook_1", is_enabled=False)
+        assert updated == {"id": "webhook_1", "is_enabled": False}
+        assert _FakeClient.instances[-1].webhooks.updated == [("webhook_1", {"is_enabled": False})]
+
+    asyncio.run(run())
+
+
+def test_webhook_update_rejects_empty_change() -> None:
+    service = _service()
+    with pytest.raises(ValueError, match="at least one"):
+        asyncio.run(service.update_webhook("webhook_1"))
+
+
+def test_schedule_retry_and_delete() -> None:
+    service = _service()
+
+    async def run() -> None:
+        retried = await service.retry_schedule("sched_1")
+        assert retried == {"id": "sched_1", "status": "scheduled"}
+        assert _FakeClient.instances[-1].schedules.retried == ["sched_1"]
+        deleted = await service.delete_schedule("sched_2")
+        assert deleted == {"deleted": True, "schedule_id": "sched_2"}
+        assert _FakeClient.instances[-1].schedules.deleted == ["sched_2"]
 
     asyncio.run(run())
 
