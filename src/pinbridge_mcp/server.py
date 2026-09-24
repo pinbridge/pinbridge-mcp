@@ -48,6 +48,92 @@ class PinInput(BaseModel):
     )
 
 
+# Shared parameter definitions so every tool's JSON schema documents its inputs.
+AccountId = Annotated[
+    str, Field(description="UUID of a connected Pinterest account, from list_pinterest_accounts.")
+]
+OptionalAccountId = Annotated[
+    str | None,
+    Field(description="UUID of a connected Pinterest account, from list_pinterest_accounts."),
+]
+BoardId = Annotated[
+    str, Field(description="Pinterest board ID (numeric string), from list_boards.")
+]
+OptionalBoardId = Annotated[
+    str | None, Field(description="Pinterest board ID (numeric string), from list_boards.")
+]
+PinId = Annotated[str, Field(description="UUID of the pin, from list_pins or create_pin.")]
+ScheduleId = Annotated[
+    str, Field(description="UUID of the schedule, from list_schedules or create_schedule.")
+]
+WebhookId = Annotated[str, Field(description="UUID of the webhook, from list_webhooks.")]
+Limit = Annotated[int, Field(description="Page size, 1-200.", ge=1, le=200)]
+Offset = Annotated[int, Field(description="Rows to skip for pagination.", ge=0)]
+IsoSince = Annotated[
+    str | None, Field(description="ISO 8601 timestamp with timezone; lower bound, inclusive.")
+]
+IsoUntil = Annotated[
+    str | None, Field(description="ISO 8601 timestamp with timezone; upper bound, exclusive.")
+]
+StartDate = Annotated[
+    str | None, Field(description="Inclusive start, YYYY-MM-DD. Default: 30 days ago.")
+]
+EndDate = Annotated[
+    str | None,
+    Field(description="Inclusive end, YYYY-MM-DD. Default: today. Ranges are capped at 90 days."),
+]
+Metrics = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Comma-separated Pinterest metric types, e.g. "
+            "IMPRESSION,SAVE,PIN_CLICK,OUTBOUND_CLICK. Default: the organic engagement set."
+        )
+    ),
+]
+Title = Annotated[str, Field(description="Pin title, at most 100 characters.", max_length=100)]
+OptionalTitle = Annotated[
+    str | None, Field(description="Pin title, at most 100 characters.", max_length=100)
+]
+Description = Annotated[
+    str | None, Field(description="Pin description, at most 800 characters.", max_length=800)
+]
+LinkUrl = Annotated[
+    str | None, Field(description="Destination URL opened when the pin is clicked.")
+]
+ImageUrl = Annotated[
+    str | None,
+    Field(description="Public URL of the image or video; Pinterest must be able to fetch it."),
+]
+AssetId = Annotated[
+    str | None, Field(description="UUID of an uploaded PinBridge asset, from upload_asset.")
+]
+CoverImageUrl = Annotated[str | None, Field(description="Public cover image URL; video pins only.")]
+CoverImageAssetId = Annotated[
+    str | None, Field(description="Uploaded image asset UUID used as the video cover.")
+]
+RunAt = Annotated[
+    str,
+    Field(
+        description=(
+            'Publish time as ISO 8601 with timezone, in the future, e.g. "2026-04-01T10:00:00Z".'
+        )
+    ),
+]
+DryRun = Annotated[
+    bool,
+    Field(
+        description=(
+            "true runs every API check (account, board, media, quota, rate headroom) and "
+            "returns the resolved payload without publishing anything."
+        )
+    ),
+]
+WebhookEvents = Annotated[
+    list[str] | None,
+    Field(description='Event names to deliver; any of "pin.published", "pin.failed".'),
+]
+
 # Every tool talks to the PinBridge API and, through it, Pinterest: an open world.
 READ = ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
@@ -224,58 +310,67 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
     @mcp.tool(annotations=READ)
     async def server_info() -> dict:
-        """Return server configuration, auth details and capabilities.
+        """Report this server's version, target PinBridge API and enabled capabilities.
 
-        Use this to confirm the server is reachable, check which PinBridge API
-        endpoint it targets and whether write tools are enabled. Resources and
-        prompts are discoverable through the standard list calls.
+        Use when a client connects for the first time, or when a call fails
+        unexpectedly, to confirm the server is reachable and whether write
+        tools are on. For the workspace's plan and quota use get_billing_status.
+
+        Returns server version, pinbridge_base_url, transport and whether write
+        tools are enabled. Needs no PinBridge scope.
         """
         return await service.server_info()
 
     @mcp.tool(annotations=READ)
     async def list_pinterest_accounts() -> list[dict]:
-        """List Pinterest accounts connected to the current workspace.
+        """List the Pinterest accounts connected to this workspace with their health.
 
-        Returns one entry per connected Pinterest account. Each entry includes
-        the account_id (UUID string) needed by list_boards, create_pin,
-        create_schedule, create_board, analytics and get_rate_meter, plus the
-        account's health (reconnect_required, missing_scopes).
+        Use first: list_boards, create_pin, create_schedule and get_rate_meter
+        all need an account_id from here. Also read pinbridge://accounts. To
+        connect a new account or fix reconnect_required, the user must use the
+        PinBridge dashboard; there is no tool for that.
 
-        Also available as the resource pinbridge://accounts.
+        Returns one entry per account with id (the account_id), username,
+        environment, and health (reconnect_required, missing_scopes). An empty
+        list means nothing is connected. Accounts outside this API key's
+        allow-list are omitted. Never fails for a valid key.
         """
         return await guarded(service.list_pinterest_accounts)
 
     @mcp.tool(annotations=READ)
-    async def list_boards(account_id: str) -> list[dict]:
-        """List Pinterest boards for a connected account.
+    async def list_boards(account_id: AccountId) -> list[dict]:
+        """List the boards an account can publish to.
 
-        Use the board id from the results as board_id in create_pin and
-        create_schedule. Also available as pinbridge://accounts/{account_id}/boards.
+        Use to pick a board_id for create_pin or create_schedule, or after
+        board_not_found. Also read pinbridge://accounts/{account_id}/boards. To
+        test one board's publishability use check_board_access.
 
-        Args:
-            account_id: UUID of the Pinterest account (from list_pinterest_accounts).
-
-        Returns a list of dicts with keys: id, name, description, privacy.
+        Returns id, name, description, privacy per board. Fails with not_found
+        for an unknown account, account_not_permitted if the key cannot use it,
+        and token_expired / token_revoked / scope_missing when the Pinterest
+        connection needs a reconnect in the dashboard.
         """
         return await guarded(lambda: service.list_boards(account_id))
 
     @mcp.tool(annotations=READ)
-    async def check_board_access(account_id: str, board_id: str, fresh: bool = False) -> dict:
+    async def check_board_access(
+        account_id: AccountId,
+        board_id: BoardId,
+        fresh: Annotated[
+            bool, Field(description="true bypasses the cached verdict and asks Pinterest again.")
+        ] = False,
+    ) -> dict:
         """Check whether an account can publish to a board right now, and why not.
 
-        Runs the same preflight create_pin uses, but reports instead of failing.
-        Call it before publishing to a board you have not used recently, or
-        when a publish failed with board_access_denied.
+        Use before publishing to a board not used recently, or after a publish
+        failed with any board_* code, instead of retrying blind. For a
+        full preflight of a specific pin use create_pin with dry_run=true.
 
-        Args:
-            account_id: UUID of the Pinterest account.
-            board_id:   Pinterest board ID.
-            fresh:      Bypass the cached verdict and ask Pinterest again.
-
-        Returns a dict with keys: publishable (bool), status (ok | failed |
-        skipped), code (board_not_found, board_not_owned, board_deleted,
-        scope_missing, token_expired, board_access_denied, ...), message,
-        remediation, board, account_health, source.
+        Returns publishable (bool), status (ok | failed | skipped when Pinterest
+        was unreachable), code (board_not_found, board_not_owned, board_deleted,
+        board_access_denied, scope_missing, token_expired), message, remediation,
+        board, account_health, source (cache | pinterest). Never raises for a
+        bad board; an unknown account fails with not_found.
         """
         return await guarded(
             lambda: service.check_board_access(
@@ -285,21 +380,25 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
     @mcp.tool(annotations=READ)
     async def list_related_terms(
-        account_id: str,
-        terms: str | list[str],
-        exact_match: bool = False,
+        account_id: AccountId,
+        terms: Annotated[
+            str | list[str],
+            Field(description="One seed term, a comma-separated string, or a list of terms."),
+        ],
+        exact_match: Annotated[
+            bool, Field(description="true keeps only groups whose term exactly matches a seed.")
+        ] = False,
     ) -> dict:
-        """Look up Pinterest related/suggested terms for one or more seed terms.
+        """Look up the search terms Pinterest associates with your seed keywords.
 
-        Useful for expanding keyword coverage when crafting pin descriptions or
-        choosing related_terms for create_pin.
+        Use while drafting a description or choosing related_terms for
+        create_pin; it reads Pinterest's own suggestions. Not needed for
+        publishing itself.
 
-        Args:
-            account_id:  UUID of the Pinterest account.
-            terms:       One term (string) or multiple terms (list or comma-separated).
-            exact_match: If True, only return groups whose term exactly matches.
-
-        Returns a dict with keys: id, related_term_count, related_terms_list.
+        Returns id, related_term_count and related_terms_list (term plus its
+        related terms). Counts against the workspace's Pinterest read limit and
+        fails with rate_limited (with retry_after_seconds) when it is spent, or
+        not_found for an unknown account.
         """
         return await guarded(
             lambda: service.list_related_terms(
@@ -309,30 +408,32 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
     @mcp.tool(annotations=READ)
     async def list_pins(
-        limit: int = 20,
-        offset: int = 0,
-        account_id: str | None = None,
-        board_id: str | None = None,
-        status: str | None = None,
-        error_code: str | None = None,
-        since: str | None = None,
-        until: str | None = None,
+        limit: Limit = 20,
+        offset: Offset = 0,
+        account_id: OptionalAccountId = None,
+        board_id: OptionalBoardId = None,
+        status: Annotated[
+            str | None,
+            Field(description="One of queued, deferred, publishing, published, failed."),
+        ] = None,
+        error_code: Annotated[
+            str | None,
+            Field(description="Only failed pins with this error code, e.g. board_access_denied."),
+        ] = None,
+        since: IsoSince = None,
+        until: IsoUntil = None,
     ) -> list[dict]:
-        """List pins in the current workspace, newest first, with optional filters.
+        """List pins in this workspace, newest first, with optional filters.
 
-        Args:
-            limit:      Number of pins to return (1-200). Default 20.
-            offset:     Number of pins to skip for pagination. Default 0.
-            account_id: Only pins for this Pinterest account.
-            board_id:   Only pins targeting this board.
-            status:     One of queued, deferred, publishing, published, failed.
-            error_code: Only failed pins with this error code (e.g. board_access_denied).
-            since:      ISO 8601 timestamp; only pins created at or after it.
-            until:      ISO 8601 timestamp; only pins created before it.
+        Use to find a pin's id, review what published or failed, or audit one
+        board or account. For one known pin use get_pin; for scheduled (not yet
+        published) pins use list_schedules.
 
-        Returns a list of pin dicts with keys: id, title, description, board_id,
-        pinterest_account_id, status, image_url, link_url, error_code,
-        error_message, pinterest_pin_id, created_at, published_at, etc.
+        Returns pin dicts with id, title, board_id, pinterest_account_id,
+        status, error_code, error_message, pinterest_pin_id, image_url,
+        link_url, created_at, published_at. An empty list means no match.
+        Filtering on an account outside the key's allow-list fails with
+        account_not_permitted.
         """
         return await guarded(
             lambda: service.list_pins(
@@ -348,35 +449,37 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         )
 
     @mcp.tool(annotations=READ)
-    async def get_pin(pin_id: str) -> dict:
-        """Fetch a single pin by its ID, including status and any error.
+    async def get_pin(pin_id: PinId) -> dict:
+        """Fetch one pin's current status, Pinterest ID and any publish error.
 
-        Args:
-            pin_id: The pin's UUID string (from list_pins or a prior create_pin).
+        Use to poll a pin from create_pin until it is published, failed or
+        deferred, or to read why it failed. To find pins without an id use
+        list_pins; for impressions and clicks use get_pin_analytics; to fix a
+        failure use retry_pin.
+
+        Returns the pin with status, error_code and error_message when failed,
+        pinterest_pin_id once published, and its media and board fields. An
+        unknown id fails with not_found.
         """
         return await guarded(lambda: service.get_pin(pin_id))
 
     @mcp.tool(annotations=READ)
     async def get_pin_analytics(
-        pin_id: str,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        metrics: str | None = None,
+        pin_id: PinId,
+        start_date: StartDate = None,
+        end_date: EndDate = None,
+        metrics: Metrics = None,
     ) -> dict:
-        """Pinterest analytics for one published pin over a date range.
+        """Pinterest performance metrics for one published pin over a date range.
 
-        Args:
-            pin_id:     The pin's UUID string.
-            start_date: Inclusive start (YYYY-MM-DD). Default: 30 days ago.
-            end_date:   Inclusive end (YYYY-MM-DD). Default: today. Ranges are
-                        capped at 90 days.
-            metrics:    Comma-separated Pinterest metric types, e.g.
-                        "IMPRESSION,SAVE,PIN_CLICK,OUTBOUND_CLICK". Default set
-                        covers organic engagement.
+        Use after a pin has been published for a while to report impressions,
+        saves and clicks. For the whole account use get_account_analytics; for
+        publish status use get_pin.
 
-        Returns a dict with keys: pin_id, pinterest_pin_id, account_id,
-        start_date, end_date, provider_mode, totals (lowercase metric names),
-        daily (list of {date, data_status, metrics}).
+        Returns pin_id, pinterest_pin_id, account_id, start_date, end_date,
+        provider_mode, totals (lowercase metric names) and daily rows. Fails
+        with not_found for an unknown pin and with conflict for a pin that has
+        not published yet; sandbox pins return zeroed metrics.
         """
         return await guarded(
             lambda: service.get_pin_analytics(
@@ -386,22 +489,21 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
     @mcp.tool(annotations=READ)
     async def get_account_analytics(
-        account_id: str,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        metrics: str | None = None,
+        account_id: AccountId,
+        start_date: StartDate = None,
+        end_date: EndDate = None,
+        metrics: Metrics = None,
     ) -> dict:
-        """Pinterest analytics for a whole connected account over a date range.
+        """Pinterest performance metrics for a whole connected account over a date range.
 
-        Args:
-            account_id: UUID of the Pinterest account.
-            start_date: Inclusive start (YYYY-MM-DD). Default: 30 days ago.
-            end_date:   Inclusive end (YYYY-MM-DD). Default: today (max 90 days).
-            metrics:    Comma-separated metric types, e.g.
-                        "IMPRESSION,ENGAGEMENT,SAVE,PIN_CLICK,OUTBOUND_CLICK".
+        Use for account-level reporting (all pins, not only ones published
+        through PinBridge). For one pin use get_pin_analytics; for publish
+        headroom use get_rate_meter.
 
-        Returns a dict with keys: account_id, start_date, end_date,
-        provider_mode, totals, daily.
+        Returns account_id, start_date, end_date, provider_mode, totals and
+        daily rows. Fails with not_found for an unknown account and with
+        token_expired / scope_missing when the Pinterest connection needs a
+        reconnect.
         """
         return await guarded(
             lambda: service.get_account_analytics(
@@ -411,26 +513,36 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
     @mcp.tool(annotations=READ)
     async def list_activity_logs(
-        limit: int = 20,
-        cursor: str | None = None,
-        category: str | None = None,
-        action: str | None = None,
-        status: str | None = None,
-        resource_type: str | None = None,
-        since: str | None = None,
+        limit: Annotated[int, Field(description="Entries per page.", ge=1, le=200)] = 20,
+        cursor: Annotated[
+            str | None, Field(description="next_cursor from the previous page.")
+        ] = None,
+        category: Annotated[
+            str | None, Field(description='Category, e.g. "publishing", "configuration".')
+        ] = None,
+        action: Annotated[
+            str | None, Field(description='Action name, e.g. "pin.publish_failed".')
+        ] = None,
+        status: Annotated[
+            str | None, Field(description='Outcome: "success", "failed", "queued", "canceled".')
+        ] = None,
+        resource_type: Annotated[
+            str | None, Field(description='Resource kind, e.g. "pin", "schedule", "board".')
+        ] = None,
+        since: Annotated[
+            str | None, Field(description="ISO 8601 timestamp; only entries after this time.")
+        ] = None,
     ) -> dict:
-        """List activity logs for the current workspace (audit trail).
+        """Read the workspace audit trail: who did what, when, with what outcome.
 
-        Args:
-            limit:         Number of log entries to return. Default 20.
-            cursor:        Pagination cursor from a previous response's next_cursor.
-            category:      Filter by category (e.g. "publishing", "configuration").
-            action:        Filter by action (e.g. "pin.publish_failed").
-            status:        Filter by status (e.g. "success", "failed", "queued").
-            resource_type: Filter by resource type (e.g. "pin", "board", "api_key").
-            since:         ISO 8601 datetime; only logs after this time.
+        Use to reconstruct what happened to a pin or schedule, or to see
+        changes made outside this session (dashboard, API, other agents). For
+        current state use get_pin / get_schedule instead.
 
-        Returns a dict with keys: items, next_cursor.
+        Returns items (log entries with action, status, message, resource_type,
+        resource_id, metadata, created_at) and next_cursor for the next page,
+        null on the last page. Fails with validation_error for a malformed
+        cursor or since value; unknown filter values return an empty page.
         """
         return await guarded(
             lambda: service.list_activity_logs(
@@ -446,57 +558,76 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
     @mcp.tool(annotations=READ)
     async def list_webhooks() -> list[dict]:
-        """List webhooks configured for the current workspace.
+        """List every webhook endpoint registered in this workspace.
 
-        Returns a list of dicts with keys: id, url, events, is_enabled, created_at.
+        Use before create_webhook to avoid registering the same URL twice, or
+        to find a webhook's id for update_webhook or delete_webhook.
+
+        Returns id, url, events, is_enabled, created_at per webhook; an empty
+        list means none are registered. Secrets are never returned. Never fails
+        for a valid key.
         """
         return await guarded(service.list_webhooks)
 
     @mcp.tool(annotations=READ)
     async def get_billing_status() -> dict:
-        """Return workspace billing plan, usage, and quota information.
+        """Return the workspace's plan, monthly publish quota, usage and feature flags.
 
-        Returns a dict with keys: plan, billing_status, quota_calls_monthly,
-        calls_used, credits_remaining, quota_exhausted, storage usage, feature
-        flags (uploaded_media_assets, bulk_imports), and related fields.
+        Use before a large create_pins_batch or after quota_exceeded to see how
+        many publishes remain, and to check plan features before upload_asset
+        (uploaded_media_assets) or create_pins_batch (bulk_imports). For
+        Pinterest's per-account publish rate use get_rate_meter; for pin
+        performance use get_account_analytics.
+
+        Returns plan, billing_status, quota_calls_monthly, calls_used,
+        quota_reset_at, quota_exhausted, credits_remaining, storage_used_bytes /
+        storage_quota_bytes, pinterest_accounts_limit, uploaded_media_assets,
+        bulk_imports. Never fails for a valid key.
         """
         return await guarded(service.get_billing_status)
 
     @mcp.tool(annotations=READ)
-    async def get_rate_meter(account_id: str) -> dict:
-        """Return current Pinterest publish rate headroom for an account.
+    async def get_rate_meter(account_id: AccountId) -> dict:
+        """Return how many Pinterest publishes an account can make right now.
 
-        Args:
-            account_id: UUID of the Pinterest account.
+        Use before publishing many pins at once, or after rate_limited, to
+        decide between publishing now and spreading pins out with
+        create_schedule. This is Pinterest's publish pacing; for the PinBridge
+        monthly quota use get_billing_status.
 
-        Returns a dict with account and global token-bucket state
-        (tokens_available, capacity, refill_rate).
+        Returns account and global token buckets, each with tokens_available,
+        capacity and refill_rate (tokens per second). tokens_available of 0
+        means the next publish is deferred until the bucket refills. An unknown
+        account fails with not_found.
         """
         return await guarded(lambda: service.get_rate_meter(account_id))
 
     @mcp.tool(annotations=READ)
     async def list_schedules(
-        limit: int = 20,
-        offset: int = 0,
-        status: str | None = None,
-        account_id: str | None = None,
-        board_id: str | None = None,
-        since: str | None = None,
-        until: str | None = None,
+        limit: Limit = 20,
+        offset: Offset = 0,
+        status: Annotated[
+            str | None,
+            Field(
+                description=("One of scheduled, queued, deferred, running, done, failed, canceled.")
+            ),
+        ] = None,
+        account_id: OptionalAccountId = None,
+        board_id: OptionalBoardId = None,
+        since: IsoSince = None,
+        until: IsoUntil = None,
     ) -> list[dict]:
-        """List scheduled pins for the current workspace, latest run_at first.
+        """List scheduled pins in this workspace, latest run_at first, with filters.
 
-        Args:
-            limit:      Number of schedules to return (1-200). Default 20.
-            offset:     Number of schedules to skip. Default 0.
-            status:     One of scheduled, queued, deferred, running, done, failed, canceled.
-            account_id: Only schedules for this Pinterest account.
-            board_id:   Only schedules targeting this board.
-            since:      ISO 8601 timestamp; only schedules running at or after it.
-            until:      ISO 8601 timestamp; only schedules running before it.
+        Use to find a schedule's id, see what is queued for a period, or list
+        failed schedules to retry. For one known schedule use get_schedule; for
+        pins that already published use list_pins.
 
-        Returns a list of schedule dicts with keys: id, pinterest_account_id,
-        run_at, status, payload, pin_id, last_error, created_at, updated_at.
+        Returns schedule dicts with id, pinterest_account_id, run_at, status,
+        payload (board_id, title, media), pin_id once it ran, last_error,
+        created_at, updated_at. An empty list means no match. Fails with
+        account_not_permitted for an account outside the key's allow-list and
+        validation_error for a bad status or timestamp.
         """
         return await guarded(
             lambda: service.list_schedules(
@@ -511,11 +642,16 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         )
 
     @mcp.tool(annotations=READ)
-    async def get_schedule(schedule_id: str) -> dict:
-        """Fetch a single scheduled pin by its ID.
+    async def get_schedule(schedule_id: ScheduleId) -> dict:
+        """Fetch one scheduled pin (a pin queued to publish at a future time) by id.
 
-        Args:
-            schedule_id: UUID of the schedule.
+        Use to check whether a schedule is still pending, has published, failed
+        or was canceled. To browse schedules use list_schedules; once status is
+        done, follow the resulting pin with get_pin using pin_id.
+
+        Returns the schedule with status, run_at, pinterest_account_id, payload
+        (board_id, title, media), pin_id and last_error. An unknown id fails
+        with not_found.
         """
         return await guarded(lambda: service.get_schedule(schedule_id))
 
@@ -526,31 +662,37 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
     @mcp.tool(annotations=WRITE_NON_IDEMPOTENT)
     async def upload_asset(
-        filename: str,
-        content_base64: str | None = None,
-        source_url: str | None = None,
-        content_type: str | None = None,
-        asset_type: Literal["image", "video"] = "image",
+        filename: Annotated[str, Field(description='File name with extension, e.g. "hero.png".')],
+        content_base64: Annotated[
+            str | None, Field(description="Base64-encoded file bytes (data: prefix allowed).")
+        ] = None,
+        source_url: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Public http(s) URL the server downloads instead of content_base64; "
+                    "no redirects, private hosts are refused."
+                )
+            ),
+        ] = None,
+        content_type: Annotated[
+            str | None, Field(description='MIME type, e.g. "image/png"; inferred when omitted.')
+        ] = None,
+        asset_type: Annotated[
+            Literal["image", "video"], Field(description="Kind of media being uploaded.")
+        ] = "image",
     ) -> dict:
         """Upload an image or video to PinBridge and get an asset_id for create_pin.
 
-        Use this when the image was generated by you or is not publicly
-        fetchable by Pinterest. Provide exactly one of content_base64 (the file
-        bytes, base64-encoded) or source_url (a URL this server can download).
+        Use when the media was generated in this session or Pinterest cannot
+        fetch it from a public URL; otherwise pass image_url to create_pin
+        directly. Provide exactly one of content_base64 or source_url. Videos
+        must be uploaded assets.
 
-        Args:
-            filename:       File name with extension, e.g. "hero.png".
-            content_base64: Base64-encoded file content.
-            source_url:     URL to download the file from instead.
-            content_type:   MIME type (e.g. "image/png"); inferred when omitted.
-            asset_type:     "image" (default) or "video".
-
-        source_url must be a public http(s) URL with no redirects; private
-        hosts are refused. Files are capped at 200 MB (plans cap lower).
-
-        Returns the asset dict with keys: id (use as asset_id), public_url,
-        asset_type, content_type, size_bytes, created_at. Uploads require a
-        paid plan (uploaded_media_assets in get_billing_status).
+        Returns id (use as asset_id), public_url, asset_type, content_type,
+        size_bytes, created_at. Files are capped at 200 MB (plans cap lower).
+        Fails with payment_required on plans without uploaded_media_assets
+        (see get_billing_status) and validation_error for unsupported media.
         """
         return await guarded(
             lambda: service.upload_asset(
@@ -564,48 +706,47 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
     @mcp.tool(annotations=WRITE_NON_IDEMPOTENT)
     async def create_pin(
-        account_id: str,
-        board_id: str,
-        title: str,
-        image_url: str | None = None,
-        asset_id: str | None = None,
-        description: str | None = None,
-        related_terms: list[str] | None = None,
-        alt_text: str | None = None,
-        dominant_color: str | None = None,
-        cover_image_url: str | None = None,
-        cover_image_asset_id: str | None = None,
-        link_url: str | None = None,
-        idempotency_key: str | None = None,
-        dry_run: bool = False,
+        account_id: AccountId,
+        board_id: BoardId,
+        title: Title,
+        image_url: ImageUrl = None,
+        asset_id: AssetId = None,
+        description: Description = None,
+        related_terms: Annotated[
+            list[str] | None, Field(description="Keywords that improve discoverability.")
+        ] = None,
+        alt_text: Annotated[
+            str | None, Field(description="Accessibility text for the image, <= 500 characters.")
+        ] = None,
+        dominant_color: Annotated[
+            str | None, Field(description='Hex color of the image, e.g. "#FF5733".')
+        ] = None,
+        cover_image_url: CoverImageUrl = None,
+        cover_image_asset_id: CoverImageAssetId = None,
+        link_url: LinkUrl = None,
+        idempotency_key: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Unique key so a retry never duplicates the pin. Generated when omitted, "
+                    "in which case a repeat call publishes again; reuse the key on retries."
+                )
+            ),
+        ] = None,
+        dry_run: DryRun = False,
     ) -> dict:
-        """Publish a pin to Pinterest now (or dry-run it with dry_run=true).
+        """Publish a pin to Pinterest now, or preflight it with dry_run=true.
 
-        Provide either image_url (publicly fetchable) or asset_id (from
-        upload_asset), not both. The board is preflighted; an unpublishable
-        board fails immediately with a stable error code and remediation.
+        Use for a pin that should go out immediately; for a future time use
+        create_schedule, for many pins use create_pins_batch. Provide either
+        image_url or asset_id (from upload_asset), not both. Run dry_run first
+        and reuse resolved.idempotency_key on the real call.
 
-        Args:
-            account_id:            UUID of the Pinterest account to publish from.
-            board_id:              ID of the board to pin to.
-            title:                 Pin title (<= 100 characters).
-            image_url:             Public URL of the pin image.
-            asset_id:              UUID of an uploaded PinBridge asset.
-            description:           Pin description (<= 800 characters).
-            related_terms:         Keywords to improve discoverability.
-            alt_text:              Accessibility text for the image.
-            dominant_color:        Hex color code (e.g. "#FF5733").
-            cover_image_url:       Cover image URL (video pins only).
-            cover_image_asset_id:  Cover image asset UUID (video pins only).
-            link_url:              Destination URL when users click the pin.
-            idempotency_key:       Unique key so a retry never duplicates the pin.
-                                   Generated if omitted (then a repeat call
-                                   publishes again); reuse it on retries.
-            dry_run:               Validate and return the checks and resolved
-                                   payload without publishing.
-
-        Returns the created pin dict (id, status "queued") or, with dry_run,
-        the validation result (valid, checks, resolved, headroom).
+        Returns the pin with id and status "queued" (poll get_pin), or with
+        dry_run the validation result (valid, checks, resolved, headroom).
+        Fails fast with board_not_found / board_not_owned / board_access_denied
+        for an unpublishable board, quota_exceeded when the monthly quota is
+        spent, and validation_error for bad fields.
         """
         return await guarded(
             lambda: service.create_pin(
@@ -627,21 +768,24 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         )
 
     @mcp.tool(annotations=WRITE_NON_IDEMPOTENT)
-    async def create_pins_batch(pins: list[PinInput]) -> dict:
+    async def create_pins_batch(
+        pins: Annotated[
+            list[PinInput],
+            Field(description="Up to 100 pins, each with the same fields as create_pin."),
+        ],
+    ) -> dict:
         """Publish several pins in one call with a per-entry outcome.
 
-        Each entry takes the same fields as create_pin. Supply an
-        idempotency_key per entry if you may need to resend the batch; keys are
-        generated when omitted, and a resend then creates every pin again.
-        Requires the bulk imports plan feature (`bulk_imports` in
-        get_billing_status) and enough monthly quota for every entry that would
-        be created.
+        Use for bulk publishing (up to 100 pins) when the workspace has the
+        bulk_imports feature; otherwise call create_pin per pin. Check
+        get_billing_status for quota first: the batch needs quota for every
+        entry. Supply an idempotency_key per entry if you may resend.
 
-        Args:
-            pins: List of pin objects (max 100).
-
-        Returns a dict with keys: created_count, existing_count, failed_count,
-        results (list of {index, idempotency_key, status, pin, error}), headroom.
+        Returns created_count, existing_count, failed_count, results (one
+        {index, idempotency_key, status, pin, error} per entry) and headroom.
+        Fails as a whole with payment_required without bulk_imports and
+        quota_exceeded when quota is short; per-entry board or validation
+        failures land in results instead.
         """
         return await guarded(
             lambda: service.create_pins_batch(
@@ -651,29 +795,26 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
     @mcp.tool(annotations=WRITE)
     async def update_pin(
-        pin_id: str,
-        title: str | None = None,
-        description: str | None = None,
-        link_url: str | None = None,
-        alt_text: str | None = None,
-        board_id: str | None = None,
+        pin_id: PinId,
+        title: OptionalTitle = None,
+        description: Description = None,
+        link_url: LinkUrl = None,
+        alt_text: Annotated[
+            str | None, Field(description="New accessibility text, <= 500 characters.")
+        ] = None,
+        board_id: OptionalBoardId = None,
     ) -> dict:
-        """Edit a pin's title, description, link, alt text or board.
+        """Edit a pin's title, description, link, alt text or board in place.
 
-        Unpublished pins are edited in place. Published pins are also updated on
-        Pinterest, keeping their engagement; fields cannot be cleared there, so
-        send a replacement value rather than an empty one. Use this instead of
-        delete-and-repost for a typo.
+        Use to fix a typo or move a pin instead of deleting and reposting: a
+        published pin is updated on Pinterest and keeps its engagement. To
+        change the image use delete_pin then create_pin; for a failed pin use
+        retry_pin. Pass at least one field.
 
-        Args:
-            pin_id:      The pin's UUID string.
-            title:       New title (<= 100 characters).
-            description: New description (<= 800 characters).
-            link_url:    New destination URL.
-            alt_text:    New accessibility text.
-            board_id:    Move the pin to another board (preflighted).
-
-        Returns the updated pin dict.
+        Returns the updated pin. Fails with not_found for an unknown id,
+        conflict (pin_publishing) while the pin is mid-publish, and
+        field_not_clearable when sending an empty value for a published pin.
+        A new board is preflighted like create_pin.
         """
         return await guarded(
             lambda: service.update_pin(
@@ -687,21 +828,28 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         )
 
     @mcp.tool(annotations=DESTRUCTIVE)
-    async def delete_pin(pin_id: str, delete_from_pinterest: bool = True) -> dict:
-        """Delete one pin — the proportionate fix for a wrong pin.
+    async def delete_pin(
+        pin_id: PinId,
+        delete_from_pinterest: Annotated[
+            bool,
+            Field(
+                description=(
+                    "true (default) also removes the published pin from Pinterest; false "
+                    "keeps it live there and only deletes the PinBridge record."
+                )
+            ),
+        ] = True,
+    ) -> dict:
+        """Delete one pin, from Pinterest too by default. Irreversible; confirm first.
 
-        With delete_from_pinterest (default) the published pin is removed from
-        Pinterest before the PinBridge record is deleted. Confirm with the user
-        before calling this tool.
+        Use for a pin that should not exist. For a wrong title, link or board
+        use update_pin instead, and never use delete_board to remove one pin.
 
-        Args:
-            pin_id:                The pin's UUID string.
-            delete_from_pinterest: Also remove the pin on Pinterest. False keeps it
-                                   live there and only drops the PinBridge record.
-
-        Returns a dict with keys: id, deleted, removed_from_pinterest,
-        pinterest_pin_id, reason (not_published / simulated_sandbox / record_only
-        when nothing was removed upstream).
+        Returns id, deleted, removed_from_pinterest, pinterest_pin_id and
+        reason when nothing was removed upstream (not_published,
+        simulated_sandbox, record_only, api_version_too_old). Fails with
+        not_found for an unknown id and insufficient_scope without the
+        destructive scope.
         """
         return await guarded(
             lambda: service.delete_pin(pin_id, delete_from_pinterest=delete_from_pinterest)
@@ -709,19 +857,26 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
     @mcp.tool(annotations=WRITE)
     async def retry_pin(
-        pin_id: str, board_id: str | None = None, account_id: str | None = None
+        pin_id: PinId,
+        board_id: Annotated[
+            str | None,
+            Field(description="Board to publish to instead of the original one, from list_boards."),
+        ] = None,
+        account_id: Annotated[
+            str | None,
+            Field(description="Pinterest account to publish with instead of the original one."),
+        ] = None,
     ) -> dict:
-        """Retry a failed pin, optionally on another board or account.
+        """Re-queue a failed pin, optionally on another board or account.
 
-        Fixes the root cause of the failure in one call (e.g. the original board
-        was deleted). The target board is preflighted like on create_pin.
+        Use only for pins whose status is failed: pass board_id when the
+        original board was deleted or inaccessible (check_board_access says
+        why), or account_id when the original account needs a reconnect. For a
+        published pin use update_pin; for a failed schedule use retry_schedule.
 
-        Args:
-            pin_id:     The failed pin's UUID string.
-            board_id:   New board to publish to (optional).
-            account_id: New Pinterest account to publish with (optional).
-
-        Returns the pin dict, re-queued for publishing.
+        Returns the pin re-queued with status "queued"; poll get_pin. The new
+        board is preflighted like create_pin. Fails with not_found for an
+        unknown id and conflict when the pin is not in failed status.
         """
         return await guarded(
             lambda: service.retry_pin(pin_id, board_id=board_id, account_id=account_id)
@@ -729,40 +884,30 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
     @mcp.tool(annotations=WRITE_NON_IDEMPOTENT)
     async def create_schedule(
-        account_id: str,
-        board_id: str,
-        title: str,
-        run_at: str,
-        image_url: str | None = None,
-        asset_id: str | None = None,
-        description: str | None = None,
-        link_url: str | None = None,
-        cover_image_url: str | None = None,
-        cover_image_asset_id: str | None = None,
-        dry_run: bool = False,
+        account_id: AccountId,
+        board_id: BoardId,
+        title: Title,
+        run_at: RunAt,
+        image_url: ImageUrl = None,
+        asset_id: AssetId = None,
+        description: Description = None,
+        link_url: LinkUrl = None,
+        cover_image_url: CoverImageUrl = None,
+        cover_image_asset_id: CoverImageAssetId = None,
+        dry_run: DryRun = False,
     ) -> dict:
-        """Schedule a pin for future publishing at a specific time.
+        """Schedule a pin to publish at a future time.
 
-        The board is preflighted at scheduling time. Provide either image_url or
-        asset_id, not both. A repeat call creates a second schedule; check
+        Use when the pin should go out later or when spreading many pins out
+        after rate_limited; for an immediate publish use create_pin. Provide
+        either image_url or asset_id, not both. The board is preflighted now,
+        not at run time. A repeat call creates a second schedule, so check
         list_schedules before resending after a timeout.
 
-        Args:
-            account_id:            UUID of the Pinterest account.
-            board_id:              ID of the board to publish to.
-            title:                 Pin title (<= 100 characters).
-            run_at:                ISO 8601 datetime with timezone, in the future.
-                                   Example: "2026-04-01T10:00:00Z".
-            image_url:             Public URL of the image.
-            asset_id:              UUID of a pre-uploaded PinBridge asset.
-            description:           Pin description (<= 800 characters).
-            link_url:              Destination URL (<= 2048 characters).
-            cover_image_url:       Custom video cover image URL.
-            cover_image_asset_id:  Custom video cover image asset UUID.
-            dry_run:               Validate (including run_at) without scheduling.
-
-        Returns the created schedule dict with status "scheduled", or the
-        validation result with dry_run.
+        Returns the schedule with id and status "scheduled" (track it with
+        get_schedule), or with dry_run the validation result. Fails with
+        validation_error for a past or timezone-less run_at, board_* codes
+        for an unpublishable board, and quota_exceeded when quota is spent.
         """
         return await guarded(
             lambda: service.create_schedule(
@@ -781,65 +926,70 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         )
 
     @mcp.tool(annotations=WRITE)
-    async def cancel_schedule(schedule_id: str) -> dict:
-        """Cancel a pending scheduled pin before it publishes.
+    async def cancel_schedule(schedule_id: ScheduleId) -> dict:
+        """Cancel a pending scheduled pin so it never publishes.
 
-        Only schedules in "scheduled" status can be canceled.
+        Use when the pin should not go out at all. To remove a finished
+        schedule from the list use delete_schedule; to re-arm a failed one use
+        retry_schedule.
 
-        Args:
-            schedule_id: UUID of the schedule to cancel.
-
-        Returns the updated schedule dict with status "canceled".
+        Returns the schedule with status "canceled". Fails with not_found for
+        an unknown id and bad_request when the schedule already ran (done,
+        failed) or was canceled.
         """
         return await guarded(lambda: service.cancel_schedule(schedule_id))
 
     @mcp.tool(annotations=WRITE)
-    async def retry_schedule(schedule_id: str) -> dict:
+    async def retry_schedule(schedule_id: ScheduleId) -> dict:
         """Re-queue a schedule whose publish failed.
 
-        Only schedules in "failed" status can be retried. The schedule (and its
-        linked pin, if any) goes back to "scheduled"; a run_at already in the
-        past publishes at the next worker tick. To change the board or account
-        first, use retry_pin on the linked pin_id instead.
+        Use for schedules in failed status (list_schedules with
+        status="failed"). The schedule and its linked pin return to a runnable
+        state; a run_at already in the past publishes at the next scheduler
+        tick. To change the board or account first, use retry_pin on the linked
+        pin_id; for a failed pin created directly, use retry_pin.
 
-        Args:
-            schedule_id: UUID of the failed schedule (from list_schedules with
-                         status="failed").
-
-        Returns the updated schedule dict with status "scheduled".
+        Returns the schedule with status "scheduled". Fails with not_found for
+        an unknown id and bad_request when the schedule is not failed.
         """
         return await guarded(lambda: service.retry_schedule(schedule_id))
 
     @mcp.tool(annotations=DESTRUCTIVE)
-    async def delete_schedule(schedule_id: str) -> dict:
-        """Delete a finished schedule record (status done, failed or canceled).
+    async def delete_schedule(schedule_id: ScheduleId) -> dict:
+        """Delete a finished schedule record (status done, failed or canceled). Irreversible.
 
-        A pending schedule cannot be deleted: cancel_schedule it first. Deleting
-        does not touch the pin that a done schedule already published. Irreversible.
+        Use to clean up history. A pending schedule cannot be deleted: use
+        cancel_schedule first. Deleting does not touch the pin a done schedule
+        already published.
 
-        Args:
-            schedule_id: UUID of the schedule to delete.
-
-        Returns {"deleted": true, "schedule_id": "<id>"} on success.
+        Returns {"deleted": true, "schedule_id": "<id>"}. Fails with not_found
+        for an unknown id, bad_request while the schedule is still pending, and
+        insufficient_scope without the destructive scope.
         """
         return await guarded(lambda: service.delete_schedule(schedule_id))
 
     @mcp.tool(annotations=WRITE_NON_IDEMPOTENT)
     async def create_board(
-        account_id: str,
-        name: str,
-        description: str | None = None,
-        privacy: Literal["PUBLIC", "SECRET"] | None = None,
+        account_id: AccountId,
+        name: Annotated[
+            str, Field(description="Board name, unique within the account, <= 180 characters.")
+        ],
+        description: Annotated[str | None, Field(description="Board description.")] = None,
+        privacy: Annotated[
+            Literal["PUBLIC", "SECRET"] | None,
+            Field(description='"PUBLIC" (default) or "SECRET".'),
+        ] = None,
     ) -> dict:
-        """Create a new Pinterest board on a connected account.
+        """Create a new board on a connected Pinterest account.
 
-        Args:
-            account_id:  UUID of the Pinterest account.
-            name:        Board name. Must be unique within the account.
-            description: Optional board description.
-            privacy:     "PUBLIC" (default) or "SECRET".
+        Use when no existing board from list_boards fits; check list_boards
+        first, since Pinterest rejects duplicate names. Not needed for a
+        one-off pin: publish to an existing board.
 
-        Returns the created board dict with keys: id, name, description, privacy.
+        Returns the board with id (use as board_id), name, description,
+        privacy. Fails with forbidden (sandbox_board_limit) when a sandbox
+        project hits its board cap and with token_expired / scope_missing when
+        the Pinterest connection needs a reconnect.
         """
         return await guarded(
             lambda: service.create_board(
@@ -848,37 +998,47 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         )
 
     @mcp.tool(annotations=DESTRUCTIVE)
-    async def delete_board(board_id: str, account_id: str) -> dict:
-        """Delete a Pinterest board and every pin on it.
+    async def delete_board(board_id: BoardId, account_id: AccountId) -> dict:
+        """Delete a Pinterest board and every pin on it. Irreversible; confirm first.
 
-        This is the nuclear option: to fix one wrong pin use delete_pin or
-        update_pin instead. Irreversible. Confirm with the user before calling.
+        Use only when the whole board should go. To fix one wrong pin use
+        update_pin or delete_pin instead.
 
-        Args:
-            board_id:   ID of the board to delete.
-            account_id: UUID of the Pinterest account that owns the board.
-
-        Returns {"deleted": true, "board_id": "<id>"} on success.
+        Returns {"deleted": true, "board_id": "<id>"}. Fails with
+        board_not_found for an unknown board, forbidden when sandbox board
+        writes are blocked, and insufficient_scope without the destructive
+        scope.
         """
         return await guarded(lambda: service.delete_board(board_id, account_id=account_id))
 
     @mcp.tool(annotations=WRITE_NON_IDEMPOTENT)
     async def create_webhook(
-        url: str,
-        secret: str,
-        events: list[str] | None = None,
-        is_enabled: bool = True,
+        url: Annotated[str, Field(description="Public endpoint that receives POSTed events.")],
+        secret: Annotated[
+            str,
+            Field(
+                description=(
+                    "Shared secret of at least 16 characters used to sign deliveries "
+                    "(HMAC-SHA256 in X-PinBridge-Signature)."
+                ),
+                min_length=16,
+            ),
+        ],
+        events: WebhookEvents = None,
+        is_enabled: Annotated[
+            bool, Field(description="false registers the endpoint without sending deliveries yet.")
+        ] = True,
     ) -> dict:
-        """Register a webhook endpoint for publishing events.
+        """Register an endpoint PinBridge calls when a pin publishes or fails.
 
-        Args:
-            url:        HTTPS endpoint that receives the events.
-            secret:     Shared secret (>= 16 characters) used to sign deliveries
-                        (X-PinBridge-Signature, HMAC-SHA256).
-            events:     Event names, default ["pin.published", "pin.failed"].
-            is_enabled: Whether deliveries start immediately. Default true.
+        Use instead of polling get_pin when the caller can receive HTTP
+        callbacks. Check list_webhooks first to avoid registering the same URL
+        twice; use update_webhook to change events or pause an existing one.
+        Default events are pin.published and pin.failed.
 
-        Returns the webhook dict with keys: id, url, events, is_enabled, created_at.
+        Returns id, url, events, is_enabled, created_at. Fails with
+        validation_error when the URL is not a valid http(s) URL or the secret
+        is shorter than 16 characters.
         """
         return await guarded(
             lambda: service.create_webhook(
@@ -888,25 +1048,27 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
     @mcp.tool(annotations=WRITE)
     async def update_webhook(
-        webhook_id: str,
-        url: str | None = None,
-        secret: str | None = None,
-        events: list[str] | None = None,
-        is_enabled: bool | None = None,
+        webhook_id: WebhookId,
+        url: Annotated[str | None, Field(description="New endpoint URL.")] = None,
+        secret: Annotated[
+            str | None, Field(description="New signing secret, at least 16 characters.")
+        ] = None,
+        events: Annotated[
+            list[str] | None,
+            Field(description='Replacement event list, e.g. ["pin.published", "pin.failed"].'),
+        ] = None,
+        is_enabled: Annotated[
+            bool | None, Field(description="false pauses deliveries, true resumes them.")
+        ] = None,
     ) -> dict:
         """Change a webhook's URL, secret, events or enabled flag.
 
-        Only the fields you pass change; omitted fields keep their value. Use
-        is_enabled=false to pause deliveries without losing the registration.
+        Use to pause deliveries (is_enabled=false) or rotate the secret without
+        losing the registration; to stop for good use delete_webhook. Only the
+        fields you pass change. Pass at least one.
 
-        Args:
-            webhook_id: UUID of the webhook (from list_webhooks).
-            url:        New HTTPS endpoint.
-            secret:     New signing secret (>= 16 characters).
-            events:     Replacement event list, e.g. ["pin.published", "pin.failed"].
-            is_enabled: Pause (false) or resume (true) deliveries.
-
-        Returns the updated webhook dict with keys: id, url, events, is_enabled.
+        Returns the updated webhook (id, url, events, is_enabled). Fails with
+        not_found for an unknown id and validation_error for a short secret.
         """
         return await guarded(
             lambda: service.update_webhook(
@@ -915,13 +1077,14 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         )
 
     @mcp.tool(annotations=DESTRUCTIVE)
-    async def delete_webhook(webhook_id: str) -> dict:
-        """Delete a webhook endpoint. Deliveries stop immediately.
+    async def delete_webhook(webhook_id: WebhookId) -> dict:
+        """Delete a webhook endpoint; deliveries stop immediately. Irreversible.
 
-        Args:
-            webhook_id: UUID of the webhook (from list_webhooks).
+        Use when the endpoint is retired. To pause temporarily use
+        update_webhook with is_enabled=false instead.
 
-        Returns {"deleted": true, "webhook_id": "<id>"} on success.
+        Returns {"deleted": true, "webhook_id": "<id>"}. Fails with not_found
+        for an unknown id and insufficient_scope without the destructive scope.
         """
         return await guarded(lambda: service.delete_webhook(webhook_id))
 
