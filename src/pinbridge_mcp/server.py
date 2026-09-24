@@ -81,6 +81,8 @@ WORKFLOW (use the publish_pin prompt for the full sequence)
   4. create_pin(..., dry_run=true) to preflight for free (nothing is published)
   5. create_pin(...) / create_schedule(...) / create_pins_batch(...)
   6. get_pin_analytics(pin_id) after publishing; update_pin / delete_pin to fix a mistake
+  7. Wrong time or board on a pending schedule? update_schedule(...) edits it in place;
+     never cancel + recreate for a small fix
 
 ACCOUNTS
   Connecting or disconnecting a Pinterest account is deliberately dashboard-only
@@ -101,9 +103,9 @@ ERRORS
 
 WRITE TOOLS
   upload_asset, create_pin, create_pins_batch, update_pin, delete_pin, retry_pin,
-  create_schedule, cancel_schedule, retry_schedule, delete_schedule, create_board,
-  delete_board, create_webhook, update_webhook, delete_webhook are only
-  registered when the server has write tools enabled.
+  create_schedule, update_schedule, cancel_schedule, retry_schedule, delete_schedule,
+  create_board, update_board, delete_board, create_webhook, update_webhook,
+  delete_webhook are only registered when the server has write tools enabled.
 
 PLAN GATE
   The server may require a minimum plan. If your request is rejected with a
@@ -781,6 +783,55 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         )
 
     @mcp.tool(annotations=WRITE)
+    async def update_schedule(
+        schedule_id: str,
+        run_at: str | None = None,
+        board_id: str | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        link_url: str | None = None,
+        image_url: str | None = None,
+        asset_id: str | None = None,
+        cover_image_url: str | None = None,
+        cover_image_asset_id: str | None = None,
+    ) -> dict:
+        """Edit a pending schedule in place instead of cancelling and recreating it.
+
+        Only the fields you pass change; the schedule keeps its id and history.
+        Works only while status is "scheduled": once publishing started the API
+        answers schedule_not_editable and tells you whether to retry_schedule
+        or update_pin instead. A new board is preflighted like on create.
+
+        Args:
+            schedule_id:           UUID of the schedule (from list_schedules).
+            run_at:                New ISO 8601 datetime with timezone, in the future.
+            board_id:              Move the pin to another board.
+            title:                 New title (<= 100 characters).
+            description:           New description (<= 800 characters).
+            link_url:              New destination URL.
+            image_url:             Replace the media with a public URL (drops any asset).
+            asset_id:              Replace the media with an uploaded asset (drops the URL).
+            cover_image_url:       New video cover image URL.
+            cover_image_asset_id:  New video cover image asset UUID.
+
+        Returns the updated schedule dict, still in status "scheduled".
+        """
+        return await guarded(
+            lambda: service.update_schedule(
+                schedule_id,
+                run_at=run_at,
+                board_id=board_id,
+                title=title,
+                description=description,
+                link_url=link_url,
+                image_url=image_url,
+                asset_id=asset_id,
+                cover_image_url=cover_image_url,
+                cover_image_asset_id=cover_image_asset_id,
+            )
+        )
+
+    @mcp.tool(annotations=WRITE)
     async def cancel_schedule(schedule_id: str) -> dict:
         """Cancel a pending scheduled pin before it publishes.
 
@@ -844,6 +895,38 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         return await guarded(
             lambda: service.create_board(
                 account_id=account_id, name=name, description=description, privacy=privacy
+            )
+        )
+
+    @mcp.tool(annotations=WRITE)
+    async def update_board(
+        board_id: str,
+        account_id: str,
+        name: str | None = None,
+        description: str | None = None,
+        privacy: Literal["PUBLIC", "SECRET"] | None = None,
+    ) -> dict:
+        """Rename a board or change its description or privacy on Pinterest.
+
+        Pins on the board are untouched. Pass at least one of name,
+        description or privacy.
+
+        Args:
+            board_id:    ID of the board to edit.
+            account_id:  UUID of the Pinterest account that owns the board.
+            name:        New board name (unique within the account).
+            description: New board description.
+            privacy:     "PUBLIC" or "SECRET".
+
+        Returns the updated board dict with keys: id, name, description, privacy.
+        """
+        return await guarded(
+            lambda: service.update_board(
+                board_id,
+                account_id=account_id,
+                name=name,
+                description=description,
+                privacy=privacy,
             )
         )
 
