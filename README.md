@@ -29,8 +29,9 @@ Read tools (always registered):
 |---|---|
 | Server | `server_info` |
 | Accounts and boards | `list_pinterest_accounts`, `list_boards`, `check_board_access`, `list_related_terms` |
-| Pins | `list_pins` (filters: account, board, status, error code, since/until), `get_pin`, `get_pin_analytics` |
-| Schedules | `list_schedules` (same filters), `get_schedule` |
+| Pins | `list_pins` (search `q`, `sort`, filters: account, board, status, error code, since/until; returns `items`, `total`, `has_more`), `get_pin`, `get_pin_analytics` |
+| Schedules | `list_schedules` (same search, sort and filters; `sort=run_at_asc` puts the next run first), `get_schedule` |
+| Reporting | `get_dashboard_summary` (pin outcomes, success rate, previous-period comparison, hourly or daily series, queue and upcoming schedules for any range up to 366 days) |
 | Workspace | `get_account_analytics`, `list_activity_logs`, `list_webhooks`, `get_billing_status`, `get_rate_meter` |
 
 Write tools (registered when `PINBRIDGE_MCP_ENABLE_WRITE_TOOLS=true`):
@@ -42,6 +43,25 @@ Write tools (registered when `PINBRIDGE_MCP_ENABLE_WRITE_TOOLS=true`):
 | Schedules | `create_schedule` (`dry_run`), `update_schedule` (edit a pending schedule in place), `cancel_schedule`, `retry_schedule` (failed → scheduled), `delete_schedule` (finished schedules only) |
 | Boards | `create_board`, `update_board` (name / description / privacy), `delete_board` |
 | Webhooks | `create_webhook`, `update_webhook` (partial; pause with `is_enabled=false`), `delete_webhook` |
+
+### Lists and paging
+
+`list_pins` and `list_schedules` return one page as an object, and publish it as the tool's MCP `outputSchema`, so a client sees every field before calling:
+
+```json
+{
+  "items": [{ "id": "…", "title": "Autumn salad", "status": "published", "…": "…" }],
+  "total": 57,
+  "limit": 20,
+  "offset": 0,
+  "has_more": true
+}
+```
+
+- `total` counts every match across all pages. To answer "how many failed pins this week?", call `list_pins(status="failed", since=…, limit=1)` and read `total`; there's no need to page through the rows.
+- For the next page, repeat the call with the same filters, `q` and `sort`, and `offset = offset + limit`, while `has_more` is `true`.
+- `total` is `null` only against a PinBridge API older than 1.34. `has_more` then means "this page came back full".
+- `list_activity_logs` pages by cursor instead: pass `next_cursor` back as `cursor`.
 
 Every tool carries `readOnlyHint`, `destructiveHint` and `idempotentHint`, so a client can decide what needs a confirmation. Creates that mint their own idempotency key are marked non-idempotent; pass `idempotency_key` yourself to make a retry safe.
 
@@ -58,7 +78,7 @@ Other codes: `board_not_found`, `board_not_owned`, `board_deleted`, `board_acces
 
 ### API version
 
-Requires PinBridge API ≥ 1.31 for `update_schedule` and `update_board`, and ≥ 1.30 otherwise. Against an older API, `check_board_access`, `update_pin`, `delete_pin`, `dry_run`, analytics, batch and the list filters fail with `PinBridge API error (404): Not Found`, and `delete_pin` reports `reason: api_version_too_old` (record deleted, pin still live on Pinterest).
+Requires PinBridge API ≥ 1.34 for `get_dashboard_summary`, list search (`q`), `sort` and `total`; ≥ 1.31 for `update_schedule` and `update_board`; and ≥ 1.30 otherwise. Against 1.30 to 1.33, `get_dashboard_summary` fails with `PinBridge API error (404): Not Found`, `q` and `sort` are ignored, and list `total` is `null` (`has_more` then means "this page was full"). Against an older API, `check_board_access`, `update_pin`, `delete_pin`, `dry_run`, analytics, batch and the list filters fail with `PinBridge API error (404): Not Found`, and `delete_pin` reports `reason: api_version_too_old` (record deleted, pin still live on Pinterest).
 
 ## Auth
 

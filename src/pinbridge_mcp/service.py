@@ -143,6 +143,19 @@ async def _aclose_client(client: Any) -> None:
         await close()
 
 
+def _page(response: Any, *, limit: int, offset: int) -> dict[str, Any]:
+    """Wrap a list response with the API's ``X-Total-Count`` so callers can page.
+
+    ``total`` is None against an API older than 1.34, which does not send the
+    header; ``has_more`` then falls back to "this page was full".
+    """
+    items = response.json()
+    raw_total = response.headers.get("X-Total-Count")
+    total = int(raw_total) if raw_total is not None and raw_total.isdigit() else None
+    has_more = offset + len(items) < total if total is not None else len(items) == limit
+    return {"items": items, "total": total, "limit": limit, "offset": offset, "has_more": has_more}
+
+
 def _error_envelope(details: Any) -> dict[str, Any]:
     """Pull the documented ``error`` envelope out of an API error body, if present."""
     if not isinstance(details, Mapping):
@@ -201,7 +214,7 @@ class PinBridgeService:
             "workspace_scope": "api_key",
             "streamable_http_path": self.settings.streamable_http_path,
             "write_tools_enabled": self.settings.enable_write_tools,
-            "requires_pinbridge_api": ">=1.30",
+            "requires_pinbridge_api": ">=1.34",
         }
 
     # ------------------------------------------------------------------ accounts / boards
@@ -297,7 +310,9 @@ class PinBridgeService:
         error_code: str | None = None,
         since: str | None = None,
         until: str | None = None,
-    ) -> list[dict[str, Any]]:
+        q: str | None = None,
+        sort: str | None = None,
+    ) -> dict[str, Any]:
         params = _clean(
             {
                 "limit": limit,
@@ -308,11 +323,13 @@ class PinBridgeService:
                 "error_code": error_code,
                 "since": _parse_iso_datetime(since, "since").isoformat() if since else None,
                 "until": _parse_iso_datetime(until, "until").isoformat() if until else None,
+                "q": q,
+                "sort": sort,
             }
         )
         async with self.client() as client:
             response = await client.request("GET", "/v1/pins", params=params)
-        return response.json()
+        return _page(response, limit=limit, offset=offset)
 
     async def get_pin(self, pin_id: str) -> dict[str, Any]:
         async with self.client() as client:
@@ -511,6 +528,29 @@ class PinBridgeService:
             )
         return response.json()
 
+    # ------------------------------------------------ dashboard
+
+    async def get_dashboard_summary(
+        self,
+        *,
+        start: str | None = None,
+        end: str | None = None,
+        tz: str = "UTC",
+        account_id: str | None = None,
+    ) -> dict[str, Any]:
+        # Offset-less timestamps are sent as-is: the API reads them in ``tz``.
+        params = _clean(
+            {
+                "start": _parse_iso_datetime(start, "start").isoformat() if start else None,
+                "end": _parse_iso_datetime(end, "end").isoformat() if end else None,
+                "tz": tz,
+                "account_id": account_id,
+            }
+        )
+        async with self.client() as client:
+            response = await client.request("GET", "/v1/dashboard/summary", params=params)
+        return response.json()
+
     # ------------------------------------------------ activity / webhooks / billing
 
     async def list_activity_logs(
@@ -669,7 +709,9 @@ class PinBridgeService:
         board_id: str | None = None,
         since: str | None = None,
         until: str | None = None,
-    ) -> list[dict[str, Any]]:
+        q: str | None = None,
+        sort: str | None = None,
+    ) -> dict[str, Any]:
         params = _clean(
             {
                 "limit": limit,
@@ -679,11 +721,13 @@ class PinBridgeService:
                 "board_id": board_id,
                 "since": _parse_iso_datetime(since, "since").isoformat() if since else None,
                 "until": _parse_iso_datetime(until, "until").isoformat() if until else None,
+                "q": q,
+                "sort": sort,
             }
         )
         async with self.client() as client:
             response = await client.request("GET", "/v1/schedules", params=params)
-        return response.json()
+        return _page(response, limit=limit, offset=offset)
 
     async def get_schedule(self, schedule_id: str) -> dict[str, Any]:
         async with self.client() as client:
