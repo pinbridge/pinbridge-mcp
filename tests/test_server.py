@@ -64,6 +64,29 @@ def test_read_only_server_registers_only_read_tools() -> None:
         assert tool.annotations.destructiveHint is False, name
 
 
+def test_open_world_hint_marks_only_tools_that_leave_the_workspace() -> None:
+    """Directory reviewers reject hints that don't match behaviour (OpenAI, Anthropic)."""
+    tools = _tools(enable_write_tools=True)
+    # Pinterest's public keyword data is the one read outside the caller's workspace.
+    for name in READ_ONLY_TOOLS:
+        assert tools[name].annotations.openWorldHint is (name == "list_related_terms"), name
+    # Every write publishes to or changes Pinterest, or delivers to an outside URL.
+    for name in WRITE_TOOLS:
+        assert tools[name].annotations.openWorldHint is True, name
+
+
+def test_protected_resource_metadata_advertises_scope() -> None:
+    from starlette.testclient import TestClient
+
+    from pinbridge_mcp.http import create_app
+
+    app = create_app(Settings(pinbridge_api_key="pb_local", enable_quota=False))
+    with TestClient(app) as client:
+        body = client.get("/.well-known/oauth-protected-resource").json()
+    assert body["scopes_supported"] == ["mcp"]
+    assert body["authorization_servers"] == ["https://api.pinbridge.io"]
+
+
 def test_write_server_registers_every_roadmap_tool_with_annotations() -> None:
     tools = _tools(enable_write_tools=True)
     assert set(tools) == READ_ONLY_TOOLS | WRITE_TOOLS
