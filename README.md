@@ -29,8 +29,9 @@ Read tools (always registered):
 |---|---|
 | Server | `server_info` |
 | Accounts and boards | `list_pinterest_accounts`, `list_boards`, `check_board_access`, `list_related_terms` |
-| Pins | `list_pins` (filters: account, board, status, error code, since/until), `get_pin`, `get_pin_analytics` |
-| Schedules | `list_schedules` (same filters), `get_schedule` |
+| Pins | `list_pins` (search `q`, `sort`, filters: account, board, status, error code, since/until; returns `items`, `total`, `has_more`), `get_pin`, `get_pin_analytics` |
+| Schedules | `list_schedules` (same search, sort and filters; `sort=run_at_asc` puts the next run first), `get_schedule` |
+| Reporting | `get_dashboard_summary` (pin outcomes, success rate, previous-period comparison, hourly or daily series, queue and upcoming schedules for any range up to 366 days) |
 | Workspace | `get_account_analytics`, `list_activity_logs`, `list_webhooks`, `get_billing_status`, `get_rate_meter` |
 
 Write tools (registered when `PINBRIDGE_MCP_ENABLE_WRITE_TOOLS=true`):
@@ -58,7 +59,7 @@ Other codes: `board_not_found`, `board_not_owned`, `board_deleted`, `board_acces
 
 ### API version
 
-Requires PinBridge API ≥ 1.31 for `update_schedule` and `update_board`, and ≥ 1.30 otherwise. Against an older API, `check_board_access`, `update_pin`, `delete_pin`, `dry_run`, analytics, batch and the list filters fail with `PinBridge API error (404): Not Found`, and `delete_pin` reports `reason: api_version_too_old` (record deleted, pin still live on Pinterest).
+Requires PinBridge API ≥ 1.34 for `get_dashboard_summary`, list search (`q`), `sort` and `total`; ≥ 1.31 for `update_schedule` and `update_board`; and ≥ 1.30 otherwise. Against 1.30 to 1.33, `get_dashboard_summary` fails with `PinBridge API error (404): Not Found`, `q` and `sort` are ignored, and list `total` is `null` (`has_more` then means "this page was full"). Against an older API, `check_board_access`, `update_pin`, `delete_pin`, `dry_run`, analytics, batch and the list filters fail with `PinBridge API error (404): Not Found`, and `delete_pin` reports `reason: api_version_too_old` (record deleted, pin still live on Pinterest).
 
 ## Auth
 
