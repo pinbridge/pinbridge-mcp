@@ -37,6 +37,7 @@ async def oauth_protected_resource(_: object) -> JSONResponse:
         {
             "resource": settings.normalized_public_base_url,
             "authorization_servers": [settings.pinbridge_base_url.rstrip("/")],
+            "scopes_supported": ["mcp"],
         }
     )
 
