@@ -8,7 +8,7 @@ from pinbridge_sdk.errors import APIError, AuthenticationError
 
 from pinbridge_mcp.auth import bind_current_api_key, reset_current_api_key
 from pinbridge_mcp.config import Settings
-from pinbridge_mcp.service import PinBridgeService
+from pinbridge_mcp.service import PIN_SUMMARY_FIELDS, PinBridgeService
 
 
 class _FakeModel:
@@ -264,15 +264,15 @@ def test_list_pins_and_schedules_send_filters_server_side() -> None:
     service = _service()
 
     async def run() -> None:
-        pins = await service.list_pins(
+        await service.list_pins(
             limit=5, status="failed", error_code="board_access_denied", since="2026-09-01T00:00:00Z"
         )
-        pin = pins["items"][0]
-        assert pin["status"] == "failed"
-        assert pin["error_code"] == "board_access_denied"
-        assert pin["since"] == "2026-09-01T00:00:00+00:00"
-        assert "board_id" not in pin
-        assert "q" not in pin and "sort" not in pin
+        params = _last_request()["params"]
+        assert params["status"] == "failed"
+        assert params["error_code"] == "board_access_denied"
+        assert params["since"] == "2026-09-01T00:00:00+00:00"
+        assert "board_id" not in params and "removed" not in params
+        assert "q" not in params and "sort" not in params
         schedules = await service.list_schedules(status="scheduled", account_id="acct_1")
         assert schedules["items"][0]["status"] == "scheduled"
         assert _last_request()["params"]["account_id"] == "acct_1"
@@ -304,6 +304,123 @@ def test_list_pins_and_schedules_send_search_and_sort_and_report_totals() -> Non
         assert partial["has_more"] is False
 
     asyncio.run(run())
+
+
+def test_list_pins_returns_summaries_unless_full_detail_is_asked() -> None:
+    full_pin = {
+        "id": "pin_1",
+        "workspace_id": "ws_1",
+        "title": "Apple crisp",
+        "description": "A long description " * 20,
+        "alt_text": "Apple crisp in a dish",
+        "media_url": "https://cdn.example.com/a.jpg",
+        "image_url": "https://cdn.example.com/a.jpg",
+        "idempotency_key": "idem-1",
+        "status": "published",
+        "board_id": "b1",
+        "pinterest_account_id": "acct_1",
+        "pinterest_pin_id": "123",
+        "link_url": "https://example.com/apple-crisp",
+        "error_code": None,
+        "error_message": None,
+        "created_at": "2026-05-08T13:13:03Z",
+        "published_at": "2026-09-25T15:31:11Z",
+        "removed_from_pinterest_at": None,
+    }
+
+    class _FullPinClient(_FakeClient):
+        async def request(self, method: str, path: str, **kwargs):  # noqa: ANN003
+            return _FakeResponse([full_pin], headers={"X-Total-Count": "1"})
+
+    service = PinBridgeService(
+        Settings(pinbridge_api_key="pb_local_key"), client_factory=_FullPinClient
+    )
+
+    async def run() -> None:
+        summary = await service.list_pins(limit=1)
+        (pin,) = summary["items"]
+        assert set(pin) == set(PIN_SUMMARY_FIELDS)
+        assert pin["title"] == "Apple crisp"
+        assert pin["published_at"] == "2026-09-25T15:31:11Z"
+        assert "description" not in pin and "media_url" not in pin
+        assert summary["total"] == 1
+
+        full = await service.list_pins(limit=1, detail="full")
+        assert full["items"] == [full_pin]
+
+    asyncio.run(run())
+
+
+def test_list_pins_sends_the_removed_filter() -> None:
+    service = _service()
+
+    async def run() -> None:
+        await service.list_pins(removed=True)
+        assert _last_request()["params"]["removed"] == "true"
+        await service.list_pins(removed=False)
+        assert _last_request()["params"]["removed"] == "false"
+
+    asyncio.run(run())
+
+
+def test_analytics_pass_the_source() -> None:
+    service = _service()
+
+    async def run() -> None:
+        await service.get_pin_analytics("pin_1", source="stored")
+        assert _last_request()["params"] == {"source": "stored"}
+        await service.get_account_analytics("acct_1", start_date="2026-09-01", source="live")
+        assert _last_request()["params"] == {"start_date": "2026-09-01", "source": "live"}
+        await service.get_pin_analytics("pin_1")
+        assert _last_request()["params"] == {}
+
+    asyncio.run(run())
+
+
+def test_list_pinterest_accounts_keeps_the_health_fields() -> None:
+    """The typed SDK model must carry every health field the tool description promises."""
+    import httpx
+    from pinbridge_sdk import AsyncPinbridgeClient
+
+    account = {
+        "id": "9ef04827-4283-41aa-8210-59f6d4926f4f",
+        "workspace_id": "336a6084-27c3-4320-a9fa-3f5695ade491",
+        "pinterest_user_id": "1151092123417052841",
+        "display_name": "amendorg",
+        "username": "amendorg",
+        "scopes": "boards:read,pins:read",
+        "token_expires_at": "2026-04-28T15:23:21Z",
+        "health_status": "reconnect_required",
+        "health_message": "Reconnect this Pinterest account.",
+        "health_checked_at": "2026-09-25T20:00:00Z",
+        "reconnect_required": True,
+        "missing_scopes": [],
+        "created_at": "2026-03-24T00:28:02Z",
+        "updated_at": "2026-03-29T15:23:21Z",
+        "revoked_at": None,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/pinterest/accounts"
+        return httpx.Response(200, json=[account])
+
+    def factory(**kwargs):  # noqa: ANN003, ANN202
+        return AsyncPinbridgeClient(
+            api_key="pb_test", base_url="https://api.test", transport=httpx.MockTransport(handler)
+        )
+
+    service = PinBridgeService(Settings(pinbridge_api_key="pb_test"), client_factory=factory)
+    (result,) = asyncio.run(service.list_pinterest_accounts())
+    for field in (
+        "health_status",
+        "health_message",
+        "reconnect_required",
+        "missing_scopes",
+        "token_expires_at",
+        "scopes",
+    ):
+        assert field in result, field
+    assert result["reconnect_required"] is True
 
 
 def test_dashboard_summary_passes_range_zone_and_account() -> None:

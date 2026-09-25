@@ -29,7 +29,7 @@ Read tools (always registered):
 |---|---|
 | Server | `server_info` |
 | Accounts and boards | `list_pinterest_accounts`, `list_boards`, `check_board_access`, `list_related_terms` |
-| Pins | `list_pins` (search `q`, `sort`, filters: account, board, status, error code, since/until; returns `items`, `total`, `has_more`), `get_pin`, `get_pin_analytics` |
+| Pins | `list_pins` (search `q`, `sort`, filters: account, board, status, error code, `removed`, since/until; slim summaries by default, `detail="full"` for every field; returns `items`, `total`, `has_more`), `get_pin`, `get_pin_analytics` (`source`: auto, stored or live) |
 | Schedules | `list_schedules` (same search, sort and filters; `sort=run_at_asc` puts the next run first), `get_schedule` |
 | Reporting | `get_dashboard_summary` (pin outcomes, success rate, previous-period comparison, hourly or daily series, queue and upcoming schedules for any range up to 366 days) |
 | Workspace | `get_account_analytics`, `list_activity_logs`, `list_webhooks`, `get_billing_status`, `get_rate_meter` |
@@ -58,10 +58,15 @@ Write tools (registered when `PINBRIDGE_MCP_ENABLE_WRITE_TOOLS=true`):
 }
 ```
 
+- `list_pins` items are summaries by default: id, title, status, board and account ids, `pinterest_pin_id`, `link_url`, error fields, `created_at`, `published_at` and `removed_from_pinterest_at`. Pass `detail="full"` for every field, or call `get_pin` for one pin. A full 200-row page runs to about 270k characters, which is more than most AI clients should read at once.
 - `total` counts every match across all pages. To answer "how many failed pins this week?", call `list_pins(status="failed", since=…, limit=1)` and read `total`; there's no need to page through the rows.
 - For the next page, repeat the call with the same filters, `q` and `sort`, and `offset = offset + limit`, while `has_more` is `true`.
 - `total` is `null` only against a PinBridge API older than 1.34. `has_more` then means "this page came back full".
 - `list_activity_logs` pages by cursor instead: pass `next_cursor` back as `cursor`.
+
+### Pins deleted on Pinterest
+
+A published pin that is later deleted on Pinterest (by hand, or with its board) keeps `status: published` and gains `removed_from_pinterest_at`. `list_pins(removed=true)` finds them. `get_pin_analytics` answers from PinBridge's stored history, and editing the pin fails with `pin_removed_on_pinterest`.
 
 Every tool carries `readOnlyHint`, `destructiveHint` and `idempotentHint`, so a client can decide what needs a confirmation. Creates that mint their own idempotency key are marked non-idempotent; pass `idempotency_key` yourself to make a retry safe.
 
@@ -74,11 +79,11 @@ Every failure carries the API's stable `code` and a remediation sentence, for ex
 - `insufficient_scope`, `account_not_permitted`: this API key's grants (scopes, account allow-list)
 - `scope_missing`, `token_expired`, `token_revoked`: the connected Pinterest account; reconnect it in the dashboard
 
-Other codes: `board_not_found`, `board_not_owned`, `board_deleted`, `board_access_denied`, `quota_exceeded`, `rate_limited` (with `retry_after_seconds`), `validation_error`.
+Other codes: `board_not_found`, `board_not_owned`, `board_deleted`, `board_access_denied`, `pin_removed_on_pinterest`, `quota_exceeded`, `rate_limited` (with `retry_after_seconds`), `validation_error`.
 
 ### API version
 
-Requires PinBridge API ≥ 1.34 for `get_dashboard_summary`, list search (`q`), `sort` and `total`; ≥ 1.31 for `update_schedule` and `update_board`; and ≥ 1.30 otherwise. Against 1.30 to 1.33, `get_dashboard_summary` fails with `PinBridge API error (404): Not Found`, `q` and `sort` are ignored, and list `total` is `null` (`has_more` then means "this page was full"). Against an older API, `check_board_access`, `update_pin`, `delete_pin`, `dry_run`, analytics, batch and the list filters fail with `PinBridge API error (404): Not Found`, and `delete_pin` reports `reason: api_version_too_old` (record deleted, pin still live on Pinterest).
+Requires PinBridge API ≥ 1.35 for the `removed` filter, `removed_from_pinterest_at` and dashboard outcomes counted by when they happened (older APIs ignore `removed`); ≥ 1.33 for the analytics `source`; ≥ 1.34 for `get_dashboard_summary`, list search (`q`), `sort` and `total`; ≥ 1.31 for `update_schedule` and `update_board`; and ≥ 1.30 otherwise. Against 1.30 to 1.33, `get_dashboard_summary` fails with `PinBridge API error (404): Not Found`, `q` and `sort` are ignored, and list `total` is `null` (`has_more` then means "this page was full"). Against an older API, `check_board_access`, `update_pin`, `delete_pin`, `dry_run`, analytics, batch and the list filters fail with `PinBridge API error (404): Not Found`, and `delete_pin` reports `reason: api_version_too_old` (record deleted, pin still live on Pinterest).
 
 ## Auth
 
