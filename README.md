@@ -44,6 +44,25 @@ Write tools (registered when `PINBRIDGE_MCP_ENABLE_WRITE_TOOLS=true`):
 | Boards | `create_board`, `update_board` (name / description / privacy), `delete_board` |
 | Webhooks | `create_webhook`, `update_webhook` (partial; pause with `is_enabled=false`), `delete_webhook` |
 
+### Lists and paging
+
+`list_pins` and `list_schedules` return one page as an object, and publish it as the tool's MCP `outputSchema`, so a client sees every field before calling:
+
+```json
+{
+  "items": [{ "id": "…", "title": "Autumn salad", "status": "published", "…": "…" }],
+  "total": 57,
+  "limit": 20,
+  "offset": 0,
+  "has_more": true
+}
+```
+
+- `total` counts every match across all pages. To answer "how many failed pins this week?", call `list_pins(status="failed", since=…, limit=1)` and read `total`; there's no need to page through the rows.
+- For the next page, repeat the call with the same filters, `q` and `sort`, and `offset = offset + limit`, while `has_more` is `true`.
+- `total` is `null` only against a PinBridge API older than 1.34. `has_more` then means "this page came back full".
+- `list_activity_logs` pages by cursor instead: pass `next_cursor` back as `cursor`.
+
 Every tool carries `readOnlyHint`, `destructiveHint` and `idempotentHint`, so a client can decide what needs a confirmation. Creates that mint their own idempotency key are marked non-idempotent; pass `idempotency_key` yourself to make a retry safe.
 
 Resources: `pinbridge://accounts` and `pinbridge://accounts/{account_id}/boards`. Prompt: `publish_pin` (upload → validate → publish → measure).

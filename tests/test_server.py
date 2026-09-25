@@ -186,3 +186,38 @@ def test_instructions_describe_the_workflow_and_error_contract() -> None:
     assert "insufficient_scope" in (mcp.instructions or "")
     assert "check_board_access" in (mcp.instructions or "")
     assert "get_dashboard_summary" in (mcp.instructions or "")
+
+
+def test_list_tools_publish_a_described_page_schema() -> None:
+    """Agents read the page shape (and how to page) from the outputSchema."""
+    tools = _tools(enable_write_tools=False)
+    for name in ("list_pins", "list_schedules"):
+        schema = tools[name].outputSchema
+        assert schema is not None, name
+        properties = schema["properties"]
+        assert set(properties) == {"items", "total", "limit", "offset", "has_more"}, name
+        assert set(schema["required"]) == set(properties), name
+        assert all(spec.get("description") for spec in properties.values()), name
+        assert "offset + limit" in properties["has_more"]["description"], name
+        assert "limit=1" in properties["total"]["description"], name
+
+
+def test_list_pins_returns_the_page_as_structured_content(monkeypatch) -> None:
+    page = {"items": [{"id": "pin-1"}], "total": 41, "limit": 20, "offset": 20, "has_more": True}
+
+    async def fake_list_pins(self, **kwargs):
+        assert kwargs["offset"] == 20
+        return page
+
+    monkeypatch.setattr("pinbridge_mcp.service.PinBridgeService.list_pins", fake_list_pins)
+    mcp = create_mcp_server(Settings(pinbridge_api_key="pb_local"))
+    content, structured = asyncio.run(mcp.call_tool("list_pins", {"offset": 20}))
+    assert structured == page
+    assert '"total": 41' in content[0].text
+
+
+def test_instructions_explain_paging_and_counting() -> None:
+    instructions = create_mcp_server(Settings(pinbridge_api_key="pb_local")).instructions or ""
+    assert "LISTS AND PAGING" in instructions
+    assert "offset = offset + limit" in instructions
+    assert "limit=1" in instructions
