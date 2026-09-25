@@ -143,6 +143,31 @@ async def _aclose_client(client: Any) -> None:
         await close()
 
 
+# The fields list_pins returns by default. A full pin also carries the
+# description, alt text, media URLs (twice) and bookkeeping ids, about three times
+# the size, which floods an AI client's context on a 200-row page.
+PIN_SUMMARY_FIELDS: tuple[str, ...] = (
+    "id",
+    "title",
+    "status",
+    "board_id",
+    "pinterest_account_id",
+    "pinterest_pin_id",
+    "link_url",
+    "error_code",
+    "error_message",
+    "created_at",
+    "published_at",
+    "removed_from_pinterest_at",
+)
+
+
+def _summarize_pin(pin: Any) -> Any:
+    if not isinstance(pin, Mapping):
+        return pin
+    return {field: pin.get(field) for field in PIN_SUMMARY_FIELDS}
+
+
 def _page(response: Any, *, limit: int, offset: int) -> dict[str, Any]:
     """Wrap a list response with the API's ``X-Total-Count`` so callers can page.
 
@@ -312,6 +337,8 @@ class PinBridgeService:
         until: str | None = None,
         q: str | None = None,
         sort: str | None = None,
+        removed: bool | None = None,
+        detail: str = "summary",
     ) -> dict[str, Any]:
         params = _clean(
             {
@@ -325,11 +352,15 @@ class PinBridgeService:
                 "until": _parse_iso_datetime(until, "until").isoformat() if until else None,
                 "q": q,
                 "sort": sort,
+                "removed": None if removed is None else ("true" if removed else "false"),
             }
         )
         async with self.client() as client:
             response = await client.request("GET", "/v1/pins", params=params)
-        return _page(response, limit=limit, offset=offset)
+        page = _page(response, limit=limit, offset=offset)
+        if detail != "full":
+            page["items"] = [_summarize_pin(pin) for pin in page["items"]]
+        return page
 
     async def get_pin(self, pin_id: str) -> dict[str, Any]:
         async with self.client() as client:
@@ -502,8 +533,11 @@ class PinBridgeService:
         start_date: str | None = None,
         end_date: str | None = None,
         metrics: str | None = None,
+        source: str | None = None,
     ) -> dict[str, Any]:
-        params = _clean({"start_date": start_date, "end_date": end_date, "metrics": metrics})
+        params = _clean(
+            {"start_date": start_date, "end_date": end_date, "metrics": metrics, "source": source}
+        )
         async with self.client() as client:
             response = await client.request(
                 "GET", "/v1/pins/{pin_id}/analytics", path_params={"pin_id": pin_id}, params=params
@@ -517,8 +551,11 @@ class PinBridgeService:
         start_date: str | None = None,
         end_date: str | None = None,
         metrics: str | None = None,
+        source: str | None = None,
     ) -> dict[str, Any]:
-        params = _clean({"start_date": start_date, "end_date": end_date, "metrics": metrics})
+        params = _clean(
+            {"start_date": start_date, "end_date": end_date, "metrics": metrics, "source": source}
+        )
         async with self.client() as client:
             response = await client.request(
                 "GET",

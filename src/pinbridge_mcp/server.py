@@ -142,9 +142,11 @@ class PinListPage(BaseModel):
 
     items: list[dict[str, Any]] = Field(
         description=(
-            "Pins on this page in the requested order, each with id, title, board_id, "
-            "pinterest_account_id, status, error_code, error_message, pinterest_pin_id, "
-            "image_url, link_url, created_at and published_at. Empty when nothing matches."
+            "Pins on this page in the requested order. With detail=summary each has id, "
+            "title, status, board_id, pinterest_account_id, pinterest_pin_id, link_url, "
+            "error_code, error_message, created_at, published_at and "
+            "removed_from_pinterest_at (set when the pin was deleted on Pinterest). "
+            "detail=full returns every pin field. Empty when nothing matches."
         )
     )
     total: PageTotal
@@ -175,7 +177,41 @@ StartDate = Annotated[
 ]
 EndDate = Annotated[
     str | None,
-    Field(description="Inclusive end, YYYY-MM-DD. Default: today. Ranges are capped at 90 days."),
+    Field(
+        description=(
+            "Inclusive end, YYYY-MM-DD. Default: today. Up to 366 days from stored history, "
+            "90 days when read live from Pinterest."
+        )
+    ),
+]
+AnalyticsSource = Annotated[
+    Literal["auto", "stored", "live"] | None,
+    Field(
+        description=(
+            "Where to read from. auto (default): PinBridge's nightly stored history when it "
+            "covers the range, else Pinterest. stored: history only (up to 366 days). live: "
+            "always ask Pinterest (up to 90 days, counts against the read limit)."
+        )
+    ),
+]
+PinDetail = Annotated[
+    Literal["summary", "full"],
+    Field(
+        description=(
+            "summary (default): the fields needed to find, audit and count pins. full: the "
+            "whole pin, including description, alt text and media URLs; about three times "
+            "larger, so prefer get_pin for one pin."
+        )
+    ),
+]
+RemovedFilter = Annotated[
+    bool | None,
+    Field(
+        description=(
+            "true: only published pins that were later deleted on Pinterest; false: leave "
+            "them out. Default: both."
+        )
+    ),
 ]
 Metrics = Annotated[
     str | None,
@@ -268,7 +304,15 @@ WORKFLOW (use the publish_pin prompt for the full sequence)
 REPORTING
   get_dashboard_summary(start, end, tz) answers "how did publishing go" for any
   period up to 366 days: counts per status, success rate, the previous period
-  for comparison, and what is queued or scheduled.
+  for comparison, and what is queued or scheduled. Outcomes count when they
+  happened: a pin submitted last month and published today is published today.
+
+PINS DELETED ON PINTEREST
+  A published pin later deleted on Pinterest keeps status published and gains
+  removed_from_pinterest_at. Find them with list_pins(removed=true). Their
+  analytics come from PinBridge's stored history; editing them fails with
+  pin_removed_on_pinterest. Clean up with delete_pin, or publish again with
+  create_pin.
 
 LISTS AND PAGING
   list_pins and list_schedules return one page as an object:
@@ -281,6 +325,9 @@ LISTS AND PAGING
   - q is a case-insensitive search over title, description and link URL;
     sort picks the order (pins: newest first; schedules: latest run first,
     run_at_asc for the next run first).
+  - list_pins items are a summary by default; pass detail="full" for every
+    field, or call get_pin for one pin. Read with limit <= 50; counting needs
+    only limit=1.
   - total is null only against a PinBridge API older than 1.34; has_more then
     just means the page came back full.
   list_activity_logs pages by cursor instead: pass next_cursor back as cursor.
@@ -458,8 +505,10 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         PinBridge dashboard; there is no tool for that.
 
         Returns one entry per account with id (the account_id), username,
-        environment, and health (reconnect_required, missing_scopes). An empty
-        list means nothing is connected. Accounts outside this API key's
+        display_name, scopes (comma-separated), token_expires_at and health:
+        health_status (healthy, refresh_due, reconnect_required or
+        scope_missing), health_message, reconnect_required and missing_scopes.
+        An empty list means nothing is connected. Accounts outside this API key's
         allow-list are omitted. Never fails for a valid key.
         """
         return await guarded(service.list_pinterest_accounts)
@@ -559,6 +608,8 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
                 )
             ),
         ] = "created_at_desc",
+        removed: RemovedFilter = None,
+        detail: PinDetail = "summary",
     ) -> PinListPage:
         """List pins in this workspace, newest first, with search, filters and sorting.
 
@@ -568,13 +619,16 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         totals over a period use get_dashboard_summary.
 
         Returns one page: {items, total, limit, offset, has_more}. items are
-        the pins (id, title, board_id, pinterest_account_id, status, error_code,
-        error_message, pinterest_pin_id, image_url, link_url, created_at,
-        published_at). total counts every match across all pages, so "how many
-        pins failed this week?" is one call with status=failed, since=... and
-        limit=1. To read further, repeat the call with the same filters, q and
-        sort and offset = offset + limit while has_more is true. total is null
-        only against a PinBridge API older than 1.34. Filtering on an account
+        pin summaries (id, title, status, board_id, pinterest_account_id,
+        pinterest_pin_id, link_url, error_code, error_message, created_at,
+        published_at, removed_from_pinterest_at); detail="full" returns every
+        field, but read one pin with get_pin instead. removed=true lists
+        published pins that were deleted on Pinterest. total counts every match
+        across all pages, so "how many pins failed this week?" is one call with
+        status=failed, since=... and limit=1. To read further, repeat the call
+        with the same filters, q and sort and offset = offset + limit while
+        has_more is true. total is null only against a PinBridge API older
+        than 1.34. Filtering on an account
         outside the key's allow-list fails with account_not_permitted, and an
         unknown sort or status fails with validation_error.
         """
@@ -590,6 +644,8 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
                 until=until,
                 q=q,
                 sort=sort,
+                removed=removed,
+                detail=detail,
             )
         )
         return PinListPage.model_validate(page)
@@ -604,8 +660,10 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         failure use retry_pin.
 
         Returns the pin with status, error_code and error_message when failed,
-        pinterest_pin_id once published, and its media and board fields. An
-        unknown id fails with not_found.
+        pinterest_pin_id once published, and its media and board fields.
+        removed_from_pinterest_at is set when the published pin was later
+        deleted on Pinterest (status stays published). An unknown id fails with
+        not_found.
         """
         return await guarded(lambda: service.get_pin(pin_id))
 
@@ -615,6 +673,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         start_date: StartDate = None,
         end_date: EndDate = None,
         metrics: Metrics = None,
+        source: AnalyticsSource = None,
     ) -> dict:
         """Pinterest performance metrics for one published pin over a date range.
 
@@ -623,13 +682,18 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         publish status use get_pin.
 
         Returns pin_id, pinterest_pin_id, account_id, start_date, end_date,
-        provider_mode, totals (lowercase metric names) and daily rows. Fails
-        with not_found for an unknown pin and with conflict for a pin that has
-        not published yet; sandbox pins return zeroed metrics.
+        provider_mode, totals (each metric summed over the range, lowercase
+        names; total_comments and total_reactions are lifetime counts), daily
+        rows, source (stored or live) and data_as_of for stored reads. A pin
+        deleted on Pinterest is answered from stored history with
+        removed_from_pinterest_at set, and fails with pin_removed_on_pinterest
+        when none is stored. Fails with not_found for an unknown pin and with
+        pin_not_published for a pin that has not published yet; sandbox pins
+        return zeroed metrics.
         """
         return await guarded(
             lambda: service.get_pin_analytics(
-                pin_id, start_date=start_date, end_date=end_date, metrics=metrics
+                pin_id, start_date=start_date, end_date=end_date, metrics=metrics, source=source
             )
         )
 
@@ -639,6 +703,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         start_date: StartDate = None,
         end_date: EndDate = None,
         metrics: Metrics = None,
+        source: AnalyticsSource = None,
     ) -> dict:
         """Pinterest performance metrics for a whole connected account over a date range.
 
@@ -646,14 +711,15 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         through PinBridge). For one pin use get_pin_analytics; for publish
         headroom use get_rate_meter.
 
-        Returns account_id, start_date, end_date, provider_mode, totals and
-        daily rows. Fails with not_found for an unknown account and with
+        Returns account_id, start_date, end_date, provider_mode, totals,
+        daily rows, and source (stored or live) with data_as_of for stored
+        reads. Fails with not_found for an unknown account and with
         token_expired / scope_missing when the Pinterest connection needs a
         reconnect.
         """
         return await guarded(
             lambda: service.get_account_analytics(
-                account_id, start_date=start_date, end_date=end_date, metrics=metrics
+                account_id, start_date=start_date, end_date=end_date, metrics=metrics, source=source
             )
         )
 
@@ -742,8 +808,10 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         the preceding period of equal length), series (created / published /
         failed per bucket), published_by_account, queue (queued, deferred,
         publishing right now), schedules (by_status in the range, upcoming) and
-        import_jobs (null when filtered by account). Pins count by when they
-        were submitted. Fails with invalid_date_range (start not before end, or
+        import_jobs (null when filtered by account). Outcomes count by when
+        they happened: published by publish time, failed by failure time (for
+        pins still failed); pins.total and series.created count pins submitted
+        in the range. Fails with invalid_date_range (start not before end, or
         more than 366 days), invalid_timezone, or account_not_permitted for an
         account outside the key's allow-list.
         """
