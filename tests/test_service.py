@@ -20,10 +20,11 @@ class _FakeModel:
 
 
 class _FakeResponse:
-    def __init__(self, payload, status_code: int = 200) -> None:
+    def __init__(self, payload, status_code: int = 200, headers: dict | None = None) -> None:
         self._payload = payload
         self.status_code = status_code
         self.content = b"" if status_code == 204 else b"{}"
+        self.headers = headers or {}
 
     def json(self):
         return self._payload if not isinstance(self._payload, dict) else dict(self._payload)
@@ -163,9 +164,15 @@ class _FakeClient:
                 {"items": [{"id": "log_1", **(kwargs.get("params") or {})}], "next_cursor": None}
             )
         if path == "/v1/pins" and method == "GET":
-            return _FakeResponse([{"id": "pin_1", **(kwargs.get("params") or {})}])
+            return _FakeResponse(
+                [{"id": "pin_1", **(kwargs.get("params") or {})}],
+                headers={"X-Total-Count": "3"},
+            )
         if path == "/v1/schedules" and method == "GET":
+            # No X-Total-Count: behaves like an API older than 1.34.
             return _FakeResponse([{"id": "sched_1", **(kwargs.get("params") or {})}])
+        if path == "/v1/dashboard/summary":
+            return _FakeResponse({"granularity": "day", **(kwargs.get("params") or {})})
         if path == "/v1/pins/validate":
             return _FakeResponse(
                 {"valid": True, "dry_run": True, "checks": [], "resolved": kwargs["json"]}
@@ -260,13 +267,69 @@ def test_list_pins_and_schedules_send_filters_server_side() -> None:
         pins = await service.list_pins(
             limit=5, status="failed", error_code="board_access_denied", since="2026-09-01T00:00:00Z"
         )
-        assert pins[0]["status"] == "failed"
-        assert pins[0]["error_code"] == "board_access_denied"
-        assert pins[0]["since"] == "2026-09-01T00:00:00+00:00"
-        assert "board_id" not in pins[0]
+        pin = pins["items"][0]
+        assert pin["status"] == "failed"
+        assert pin["error_code"] == "board_access_denied"
+        assert pin["since"] == "2026-09-01T00:00:00+00:00"
+        assert "board_id" not in pin
+        assert "q" not in pin and "sort" not in pin
         schedules = await service.list_schedules(status="scheduled", account_id="acct_1")
-        assert schedules[0]["status"] == "scheduled"
+        assert schedules["items"][0]["status"] == "scheduled"
         assert _last_request()["params"]["account_id"] == "acct_1"
+
+    asyncio.run(run())
+
+
+def test_list_pins_and_schedules_send_search_and_sort_and_report_totals() -> None:
+    service = _service()
+
+    async def run() -> None:
+        pins = await service.list_pins(limit=1, offset=1, q="autumn salad", sort="title_asc")
+        params = _last_request()["params"]
+        assert params["q"] == "autumn salad"
+        assert params["sort"] == "title_asc"
+        assert pins["total"] == 3
+        assert (pins["limit"], pins["offset"]) == (1, 1)
+        assert pins["has_more"] is True  # 1 skipped + 1 returned < 3
+
+        last_page = await service.list_pins(limit=1, offset=2)
+        assert last_page["has_more"] is False
+
+        schedules = await service.list_schedules(limit=1, q="soup", sort="run_at_asc")
+        assert _last_request()["params"]["sort"] == "run_at_asc"
+        # Without the header (API < 1.34) total is unknown; a full page may have more.
+        assert schedules["total"] is None
+        assert schedules["has_more"] is True
+        partial = await service.list_schedules(limit=5)
+        assert partial["has_more"] is False
+
+    asyncio.run(run())
+
+
+def test_dashboard_summary_passes_range_zone_and_account() -> None:
+    service = _service()
+
+    async def run() -> None:
+        summary = await service.get_dashboard_summary(
+            start="2026-09-01", end="2026-09-08T00:00:00Z", tz="Europe/Paris", account_id="acct_1"
+        )
+        request = _last_request()
+        assert request["method"] == "GET"
+        assert request["path"] == "/v1/dashboard/summary"
+        # An offset-less start stays offset-less so the API reads it in tz.
+        assert request["params"] == {
+            "start": "2026-09-01T00:00:00",
+            "end": "2026-09-08T00:00:00+00:00",
+            "tz": "Europe/Paris",
+            "account_id": "acct_1",
+        }
+        assert summary["granularity"] == "day"
+
+        await service.get_dashboard_summary()
+        assert _last_request()["params"] == {"tz": "UTC"}
+
+        with pytest.raises(ValueError, match="start must be an ISO 8601"):
+            await service.get_dashboard_summary(start="last week")
 
     asyncio.run(run())
 
