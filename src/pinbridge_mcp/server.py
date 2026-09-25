@@ -265,8 +265,14 @@ WebhookEvents = Annotated[
     Field(description='Event names to deliver; any of "pin.published", "pin.failed".'),
 ]
 
-# Every tool talks to the PinBridge API and, through it, Pinterest: an open world.
+# openWorldHint marks tools that reach past the caller's own workspace: publishing to
+# or changing public Pinterest, searching Pinterest's public keyword data, or sending
+# webhook deliveries to an outside URL. Reading the workspace's own accounts, pins,
+# schedules and stats is a closed world.
 READ = ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+)
+READ_PUBLIC = ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 )
 WRITE = ToolAnnotations(
@@ -554,7 +560,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @tool(READ, "List related keywords")
+    @tool(READ_PUBLIC, "List related keywords")
     async def list_related_terms(
         account_id: AccountId,
         terms: Annotated[
