@@ -369,6 +369,16 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         except Exception as exc:
             raise ValueError(service.format_error(exc)) from exc
 
+    def tool(
+        base: ToolAnnotations, title: str
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """Register a tool with its human-readable title.
+
+        The title goes on the tool and in annotations.title, which the Claude
+        connectors directory reads for its listing.
+        """
+        return mcp.tool(title=title, annotations=base.model_copy(update={"title": title}))
+
     # ------------------------------------------------------------------ resources
 
     @mcp.resource(
@@ -425,7 +435,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
     # ------------------------------------------------------------------ read tools
 
-    @mcp.tool(annotations=READ)
+    @tool(READ, "Server info")
     async def server_info() -> dict:
         """Report this server's version, target PinBridge API and enabled capabilities.
 
@@ -438,7 +448,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         """
         return await service.server_info()
 
-    @mcp.tool(annotations=READ)
+    @tool(READ, "List Pinterest accounts")
     async def list_pinterest_accounts() -> list[dict]:
         """List the Pinterest accounts connected to this workspace with their health.
 
@@ -454,7 +464,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         """
         return await guarded(service.list_pinterest_accounts)
 
-    @mcp.tool(annotations=READ)
+    @tool(READ, "List boards")
     async def list_boards(account_id: AccountId) -> list[dict]:
         """List the boards an account can publish to.
 
@@ -469,7 +479,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         """
         return await guarded(lambda: service.list_boards(account_id))
 
-    @mcp.tool(annotations=READ)
+    @tool(READ, "Check board access")
     async def check_board_access(
         account_id: AccountId,
         board_id: BoardId,
@@ -495,7 +505,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool(annotations=READ)
+    @tool(READ, "List related keywords")
     async def list_related_terms(
         account_id: AccountId,
         terms: Annotated[
@@ -523,7 +533,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool(annotations=READ)
+    @tool(READ, "List pins")
     async def list_pins(
         limit: Limit = 20,
         offset: Offset = 0,
@@ -584,7 +594,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         )
         return PinListPage.model_validate(page)
 
-    @mcp.tool(annotations=READ)
+    @tool(READ, "Get pin")
     async def get_pin(pin_id: PinId) -> dict:
         """Fetch one pin's current status, Pinterest ID and any publish error.
 
@@ -599,7 +609,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         """
         return await guarded(lambda: service.get_pin(pin_id))
 
-    @mcp.tool(annotations=READ)
+    @tool(READ, "Get pin analytics")
     async def get_pin_analytics(
         pin_id: PinId,
         start_date: StartDate = None,
@@ -623,7 +633,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool(annotations=READ)
+    @tool(READ, "Get account analytics")
     async def get_account_analytics(
         account_id: AccountId,
         start_date: StartDate = None,
@@ -647,7 +657,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool(annotations=READ)
+    @tool(READ, "List activity logs")
     async def list_activity_logs(
         limit: Annotated[int, Field(description="Entries per page.", ge=1, le=200)] = 20,
         cursor: Annotated[
@@ -692,7 +702,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool(annotations=READ)
+    @tool(READ, "Get dashboard summary")
     async def get_dashboard_summary(
         start: Annotated[
             str | None,
@@ -743,7 +753,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool(annotations=READ)
+    @tool(READ, "List webhooks")
     async def list_webhooks() -> list[dict]:
         """List every webhook endpoint registered in this workspace.
 
@@ -756,7 +766,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         """
         return await guarded(service.list_webhooks)
 
-    @mcp.tool(annotations=READ)
+    @tool(READ, "Get billing status")
     async def get_billing_status() -> dict:
         """Return the workspace's plan, monthly publish quota, usage and feature flags.
 
@@ -773,7 +783,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         """
         return await guarded(service.get_billing_status)
 
-    @mcp.tool(annotations=READ)
+    @tool(READ, "Check rate limits")
     async def get_rate_meter(account_id: AccountId) -> dict:
         """Return how many Pinterest publishes an account can make right now.
 
@@ -789,7 +799,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         """
         return await guarded(lambda: service.get_rate_meter(account_id))
 
-    @mcp.tool(annotations=READ)
+    @tool(READ, "List scheduled pins")
     async def list_schedules(
         limit: Limit = 20,
         offset: Offset = 0,
@@ -846,7 +856,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         )
         return ScheduleListPage.model_validate(page)
 
-    @mcp.tool(annotations=READ)
+    @tool(READ, "Get scheduled pin")
     async def get_schedule(schedule_id: ScheduleId) -> dict:
         """Fetch one scheduled pin (a pin queued to publish at a future time) by id.
 
@@ -865,7 +875,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
     # ------------------------------------------------------------------ write tools
 
-    @mcp.tool(annotations=WRITE_NON_IDEMPOTENT)
+    @tool(WRITE_NON_IDEMPOTENT, "Upload image or video")
     async def upload_asset(
         filename: Annotated[str, Field(description='File name with extension, e.g. "hero.png".')],
         content_base64: Annotated[
@@ -909,7 +919,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool(annotations=WRITE_NON_IDEMPOTENT)
+    @tool(WRITE_NON_IDEMPOTENT, "Publish pin")
     async def create_pin(
         account_id: AccountId,
         board_id: BoardId,
@@ -972,7 +982,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool(annotations=WRITE_NON_IDEMPOTENT)
+    @tool(WRITE_NON_IDEMPOTENT, "Publish pins in bulk")
     async def create_pins_batch(
         pins: Annotated[
             list[PinInput],
@@ -998,7 +1008,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool(annotations=WRITE)
+    @tool(WRITE, "Update pin")
     async def update_pin(
         pin_id: PinId,
         title: OptionalTitle = None,
@@ -1032,7 +1042,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool(annotations=DESTRUCTIVE)
+    @tool(DESTRUCTIVE, "Delete pin")
     async def delete_pin(
         pin_id: PinId,
         delete_from_pinterest: Annotated[
@@ -1060,7 +1070,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             lambda: service.delete_pin(pin_id, delete_from_pinterest=delete_from_pinterest)
         )
 
-    @mcp.tool(annotations=WRITE)
+    @tool(WRITE, "Retry pin")
     async def retry_pin(
         pin_id: PinId,
         board_id: Annotated[
@@ -1087,7 +1097,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             lambda: service.retry_pin(pin_id, board_id=board_id, account_id=account_id)
         )
 
-    @mcp.tool(annotations=WRITE_NON_IDEMPOTENT)
+    @tool(WRITE_NON_IDEMPOTENT, "Schedule pin")
     async def create_schedule(
         account_id: AccountId,
         board_id: BoardId,
@@ -1130,7 +1140,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool(annotations=WRITE)
+    @tool(WRITE, "Update scheduled pin")
     async def update_schedule(
         schedule_id: ScheduleId,
         run_at: Annotated[
@@ -1182,7 +1192,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool(annotations=WRITE)
+    @tool(WRITE, "Cancel scheduled pin")
     async def cancel_schedule(schedule_id: ScheduleId) -> dict:
         """Cancel a pending scheduled pin so it never publishes.
 
@@ -1196,7 +1206,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         """
         return await guarded(lambda: service.cancel_schedule(schedule_id))
 
-    @mcp.tool(annotations=WRITE)
+    @tool(WRITE, "Retry scheduled pin")
     async def retry_schedule(schedule_id: ScheduleId) -> dict:
         """Re-queue a schedule whose publish failed.
 
@@ -1211,7 +1221,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         """
         return await guarded(lambda: service.retry_schedule(schedule_id))
 
-    @mcp.tool(annotations=DESTRUCTIVE)
+    @tool(DESTRUCTIVE, "Delete scheduled pin")
     async def delete_schedule(schedule_id: ScheduleId) -> dict:
         """Delete a finished schedule record (status done, failed or canceled). Irreversible.
 
@@ -1225,7 +1235,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         """
         return await guarded(lambda: service.delete_schedule(schedule_id))
 
-    @mcp.tool(annotations=WRITE_NON_IDEMPOTENT)
+    @tool(WRITE_NON_IDEMPOTENT, "Create board")
     async def create_board(
         account_id: AccountId,
         name: Annotated[
@@ -1254,7 +1264,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool(annotations=WRITE)
+    @tool(WRITE, "Update board")
     async def update_board(
         board_id: BoardId,
         account_id: AccountId,
@@ -1287,7 +1297,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool(annotations=DESTRUCTIVE)
+    @tool(DESTRUCTIVE, "Delete board")
     async def delete_board(board_id: BoardId, account_id: AccountId) -> dict:
         """Delete a Pinterest board and every pin on it. Irreversible; confirm first.
 
@@ -1301,7 +1311,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         """
         return await guarded(lambda: service.delete_board(board_id, account_id=account_id))
 
-    @mcp.tool(annotations=WRITE_NON_IDEMPOTENT)
+    @tool(WRITE_NON_IDEMPOTENT, "Create webhook")
     async def create_webhook(
         url: Annotated[str, Field(description="Public endpoint that receives POSTed events.")],
         secret: Annotated[
@@ -1336,7 +1346,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool(annotations=WRITE)
+    @tool(WRITE, "Update webhook")
     async def update_webhook(
         webhook_id: WebhookId,
         url: Annotated[str | None, Field(description="New endpoint URL.")] = None,
@@ -1351,7 +1361,11 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             bool | None, Field(description="false pauses deliveries, true resumes them.")
         ] = None,
     ) -> dict:
-        """Change a webhook's URL, secret, events or enabled flag.
+        """Change a PinBridge webhook's URL, secret, events or enabled flag.
+
+        Calls PATCH /v1/webhooks/{webhook_id} on the PinBridge API; the fields,
+        event names and signed delivery format are documented at
+        https://www.pinbridge.io/docs/api/webhooks/.
 
         Use to pause deliveries (is_enabled=false) or rotate the secret without
         losing the registration; to stop for good use delete_webhook. Only the
@@ -1366,7 +1380,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool(annotations=DESTRUCTIVE)
+    @tool(DESTRUCTIVE, "Delete webhook")
     async def delete_webhook(webhook_id: WebhookId) -> dict:
         """Delete a webhook endpoint; deliveries stop immediately. Irreversible.
 

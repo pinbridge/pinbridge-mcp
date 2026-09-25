@@ -81,6 +81,17 @@ def test_write_server_registers_every_roadmap_tool_with_annotations() -> None:
         assert tools[name].annotations.idempotentHint is True, name
 
 
+def test_every_tool_has_a_title_for_the_directory_listing() -> None:
+    """Claude's connectors directory flags any tool without annotations.title."""
+    tools = _tools(enable_write_tools=True)
+    titles = []
+    for name, tool in tools.items():
+        assert tool.annotations is not None and tool.annotations.title, name
+        assert tool.title == tool.annotations.title, name
+        titles.append(tool.annotations.title)
+    assert len(titles) == len(set(titles))
+
+
 def test_every_parameter_has_a_schema_description() -> None:
     """Glama's TDQS scores schema-level parameter descriptions; keep coverage at 100%."""
     tools = _tools(enable_write_tools=True)
