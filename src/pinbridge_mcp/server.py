@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Literal, TypeVar
+from typing import Annotated, Any, Literal, TypeVar
 from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
@@ -68,13 +68,108 @@ ScheduleId = Annotated[
 ]
 WebhookId = Annotated[str, Field(description="UUID of the webhook, from list_webhooks.")]
 Limit = Annotated[int, Field(description="Page size, 1-200.", ge=1, le=200)]
-Offset = Annotated[int, Field(description="Rows to skip for pagination.", ge=0)]
+Offset = Annotated[
+    int,
+    Field(
+        description="Rows to skip. For the next page pass offset + limit from the last result.",
+        ge=0,
+    ),
+]
 IsoSince = Annotated[
     str | None, Field(description="ISO 8601 timestamp with timezone; lower bound, inclusive.")
 ]
 IsoUntil = Annotated[
     str | None, Field(description="ISO 8601 timestamp with timezone; upper bound, exclusive.")
 ]
+SearchQuery = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Case-insensitive text to find in the title, description or link URL; "
+            "% and _ match literally."
+        ),
+        max_length=200,
+    ),
+]
+PinSort = Literal[
+    "created_at_desc",
+    "created_at_asc",
+    "published_at_desc",
+    "published_at_asc",
+    "title_asc",
+    "title_desc",
+    "status_asc",
+    "status_desc",
+]
+ScheduleSort = Literal[
+    "run_at_desc",
+    "run_at_asc",
+    "created_at_desc",
+    "created_at_asc",
+    "title_asc",
+    "title_desc",
+    "status_asc",
+    "status_desc",
+]
+
+# Result shape of list_pins / list_schedules. The models give those tools an MCP
+# outputSchema, so clients see every field and its meaning before calling.
+PageTotal = Annotated[
+    int | None,
+    Field(
+        description=(
+            "How many rows match the filters and search across all pages. Answer "
+            '"how many ...?" from this; limit=1 is enough. Null only when the PinBridge '
+            "API is older than 1.34."
+        )
+    ),
+]
+PageLimit = Annotated[int, Field(description="Page size used for this call.")]
+PageOffset = Annotated[int, Field(description="Rows skipped before this page.")]
+PageHasMore = Annotated[
+    bool,
+    Field(
+        description=(
+            "true when more rows follow: call again with the same filters, q and sort and "
+            "offset = offset + limit. When total is null it only means this page was full."
+        )
+    ),
+]
+
+
+class PinListPage(BaseModel):
+    """One page of list_pins results plus the total number of matching pins."""
+
+    items: list[dict[str, Any]] = Field(
+        description=(
+            "Pins on this page in the requested order, each with id, title, board_id, "
+            "pinterest_account_id, status, error_code, error_message, pinterest_pin_id, "
+            "image_url, link_url, created_at and published_at. Empty when nothing matches."
+        )
+    )
+    total: PageTotal
+    limit: PageLimit
+    offset: PageOffset
+    has_more: PageHasMore
+
+
+class ScheduleListPage(BaseModel):
+    """One page of list_schedules results plus the total number of matching schedules."""
+
+    items: list[dict[str, Any]] = Field(
+        description=(
+            "Schedules on this page in the requested order, each with id, "
+            "pinterest_account_id, run_at, status, payload (board_id, title, media), "
+            "pin_id once it ran, last_error, created_at and updated_at. Empty when nothing "
+            "matches."
+        )
+    )
+    total: PageTotal
+    limit: PageLimit
+    offset: PageOffset
+    has_more: PageHasMore
+
+
 StartDate = Annotated[
     str | None, Field(description="Inclusive start, YYYY-MM-DD. Default: 30 days ago.")
 ]
@@ -169,6 +264,26 @@ WORKFLOW (use the publish_pin prompt for the full sequence)
   6. get_pin_analytics(pin_id) after publishing; update_pin / delete_pin to fix a mistake
   7. Wrong time or board on a pending schedule? update_schedule(...) edits it in place;
      never cancel + recreate for a small fix
+
+REPORTING
+  get_dashboard_summary(start, end, tz) answers "how did publishing go" for any
+  period up to 366 days: counts per status, success rate, the previous period
+  for comparison, and what is queued or scheduled.
+
+LISTS AND PAGING
+  list_pins and list_schedules return one page as an object:
+    {"items": [...], "total": 57, "limit": 20, "offset": 0, "has_more": true}
+  - items: the rows on this page, in the requested sort order.
+  - total: every match across all pages. For "how many?" questions call once
+    with limit=1 and read total; never page through rows just to count them.
+  - Next page: repeat the call with the same filters, q and sort and
+    offset = offset + limit, while has_more is true.
+  - q is a case-insensitive search over title, description and link URL;
+    sort picks the order (pins: newest first; schedules: latest run first,
+    run_at_asc for the next run first).
+  - total is null only against a PinBridge API older than 1.34; has_more then
+    just means the page came back full.
+  list_activity_logs pages by cursor instead: pass next_cursor back as cursor.
 
 ACCOUNTS
   Connecting or disconnecting a Pinterest account is deliberately dashboard-only
@@ -424,20 +539,36 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         ] = None,
         since: IsoSince = None,
         until: IsoUntil = None,
-    ) -> list[dict]:
-        """List pins in this workspace, newest first, with optional filters.
+        q: SearchQuery = None,
+        sort: Annotated[
+            PinSort,
+            Field(
+                description=(
+                    "Order: created_at, published_at (unpublished last), title or status, "
+                    "each _asc or _desc."
+                )
+            ),
+        ] = "created_at_desc",
+    ) -> PinListPage:
+        """List pins in this workspace, newest first, with search, filters and sorting.
 
-        Use to find a pin's id, review what published or failed, or audit one
-        board or account. For one known pin use get_pin; for scheduled (not yet
-        published) pins use list_schedules.
+        Use to find a pin's id (search its title with q), review what published
+        or failed, or audit one board or account. For one known pin use
+        get_pin; for scheduled (not yet published) pins use list_schedules; for
+        totals over a period use get_dashboard_summary.
 
-        Returns pin dicts with id, title, board_id, pinterest_account_id,
-        status, error_code, error_message, pinterest_pin_id, image_url,
-        link_url, created_at, published_at. An empty list means no match.
-        Filtering on an account outside the key's allow-list fails with
-        account_not_permitted.
+        Returns one page: {items, total, limit, offset, has_more}. items are
+        the pins (id, title, board_id, pinterest_account_id, status, error_code,
+        error_message, pinterest_pin_id, image_url, link_url, created_at,
+        published_at). total counts every match across all pages, so "how many
+        pins failed this week?" is one call with status=failed, since=... and
+        limit=1. To read further, repeat the call with the same filters, q and
+        sort and offset = offset + limit while has_more is true. total is null
+        only against a PinBridge API older than 1.34. Filtering on an account
+        outside the key's allow-list fails with account_not_permitted, and an
+        unknown sort or status fails with validation_error.
         """
-        return await guarded(
+        page = await guarded(
             lambda: service.list_pins(
                 limit=limit,
                 offset=offset,
@@ -447,8 +578,11 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
                 error_code=error_code,
                 since=since,
                 until=until,
+                q=q,
+                sort=sort,
             )
         )
+        return PinListPage.model_validate(page)
 
     @mcp.tool(annotations=READ)
     async def get_pin(pin_id: PinId) -> dict:
@@ -559,6 +693,57 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         )
 
     @mcp.tool(annotations=READ)
+    async def get_dashboard_summary(
+        start: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Range start, inclusive, ISO 8601. Without an offset it is read in tz, "
+                    'e.g. "2026-09-01" is local midnight. Default: 30 days before end.'
+                )
+            ),
+        ] = None,
+        end: Annotated[
+            str | None,
+            Field(description="Range end, exclusive, ISO 8601. Default: now."),
+        ] = None,
+        tz: Annotated[
+            str,
+            Field(
+                description=(
+                    'IANA time zone for the day/hour buckets, e.g. "Europe/Paris". Default "UTC".'
+                ),
+                max_length=64,
+            ),
+        ] = "UTC",
+        account_id: OptionalAccountId = None,
+    ) -> dict:
+        """Summarize publishing activity over a period: how many pins went out and how it went.
+
+        Use to answer "how did publishing go this week / today / last month":
+        pin outcomes, success rate, the change against the previous period,
+        and what is still queued or scheduled. Ranges up to 48 hours come back
+        hourly, longer ones daily, up to 366 days. For Pinterest engagement
+        (impressions, saves, clicks) use get_account_analytics; to see the
+        individual failed pins use list_pins with status=failed.
+
+        Returns start, end, timezone, granularity (hour | day), pins (total,
+        by_status, success_rate from 0 to 1), previous_pins (same figures for
+        the preceding period of equal length), series (created / published /
+        failed per bucket), published_by_account, queue (queued, deferred,
+        publishing right now), schedules (by_status in the range, upcoming) and
+        import_jobs (null when filtered by account). Pins count by when they
+        were submitted. Fails with invalid_date_range (start not before end, or
+        more than 366 days), invalid_timezone, or account_not_permitted for an
+        account outside the key's allow-list.
+        """
+        return await guarded(
+            lambda: service.get_dashboard_summary(
+                start=start, end=end, tz=tz, account_id=account_id
+            )
+        )
+
+    @mcp.tool(annotations=READ)
     async def list_webhooks() -> list[dict]:
         """List every webhook endpoint registered in this workspace.
 
@@ -618,20 +803,35 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         board_id: OptionalBoardId = None,
         since: IsoSince = None,
         until: IsoUntil = None,
-    ) -> list[dict]:
-        """List scheduled pins in this workspace, latest run_at first, with filters.
+        q: SearchQuery = None,
+        sort: Annotated[
+            ScheduleSort,
+            Field(
+                description=(
+                    "Order: run_at, created_at, title or status, each _asc or _desc. "
+                    "run_at_asc lists the next run first."
+                )
+            ),
+        ] = "run_at_desc",
+    ) -> ScheduleListPage:
+        """List scheduled pins in this workspace, latest run_at first, with search and filters.
 
-        Use to find a schedule's id, see what is queued for a period, or list
-        failed schedules to retry. For one known schedule use get_schedule; for
-        pins that already published use list_pins.
+        Use to find a schedule's id (search its title with q), see what is
+        queued for a period (status=scheduled, sort=run_at_asc), or list failed
+        schedules to retry. For one known schedule use get_schedule; for pins
+        that already published use list_pins.
 
-        Returns schedule dicts with id, pinterest_account_id, run_at, status,
-        payload (board_id, title, media), pin_id once it ran, last_error,
-        created_at, updated_at. An empty list means no match. Fails with
-        account_not_permitted for an account outside the key's allow-list and
-        validation_error for a bad status or timestamp.
+        Returns one page: {items, total, limit, offset, has_more}. items are
+        the schedules (id, pinterest_account_id, run_at, status, payload with
+        board_id, title and media, pin_id once it ran, last_error, created_at,
+        updated_at). total counts every match across all pages, so "how many
+        pins are scheduled for next week?" is one call with status=scheduled,
+        since/until and limit=1. To read further, repeat the call with the same
+        filters, q and sort and offset = offset + limit while has_more is true.
+        Fails with account_not_permitted for an account outside the key's
+        allow-list and validation_error for a bad status, sort or timestamp.
         """
-        return await guarded(
+        page = await guarded(
             lambda: service.list_schedules(
                 limit=limit,
                 offset=offset,
@@ -640,8 +840,11 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
                 board_id=board_id,
                 since=since,
                 until=until,
+                q=q,
+                sort=sort,
             )
         )
+        return ScheduleListPage.model_validate(page)
 
     @mcp.tool(annotations=READ)
     async def get_schedule(schedule_id: ScheduleId) -> dict:
