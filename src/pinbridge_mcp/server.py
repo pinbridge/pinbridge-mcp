@@ -351,8 +351,13 @@ ERRORS
   about THIS API key's grants (ask a workspace admin for a wider key);
   scope_missing / token_expired / token_revoked are about the connected
   Pinterest account (reconnect it in the PinBridge dashboard). Board codes:
-  board_not_found, board_not_owned, board_deleted, board_access_denied. Others:
-  quota_exceeded, rate_limited (has retry_after_seconds), validation_error.
+  board_not_found, board_not_owned, board_deleted, board_access_denied. Two codes
+  are Pinterest refusing the action itself, so reconnecting does NOT help:
+  pinterest_feature_unavailable (Pinterest has not enabled the feature for
+  PinBridge; today that is editing a published pin) and pinterest_not_permitted
+  (e.g. SECRET boards). invalid_image means the file is broken: upload a valid
+  one. Others: quota_exceeded, rate_limited (has retry_after_seconds),
+  validation_error.
   Prefer a dry run (or check_board_access after a board failure) over retrying blind.
 
 WRITE TOOLS
@@ -391,7 +396,9 @@ PUBLISH_PIN_STEPS = """Publish one pin with PinBridge, in this order:
    retry_pin can move it to another board or account.
 9. Later, get_pin_analytics(pin_id) reports impressions, saves and clicks. A wrong
    pin is fixed with update_pin (title/description/link/alt_text/board) or
-   delete_pin, never by deleting the board."""
+   delete_pin, never by deleting the board. If update_pin on a published pin
+   fails with pinterest_feature_unavailable, delete_pin and publish a corrected pin
+   (after the user confirms)."""
 
 
 def create_mcp_server(settings: Settings | None = None) -> FastMCP:
@@ -981,7 +988,9 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         Returns id (use as asset_id), public_url, asset_type, content_type,
         size_bytes, created_at. Files are capped at 200 MB (plans cap lower).
         Fails with payment_required on plans without uploaded_media_assets
-        (see get_billing_status) and validation_error for unsupported media.
+        (see get_billing_status), validation_error for unsupported media, and
+        invalid_image when the file is truncated or corrupted (re-encode the
+        exact original bytes; never retype base64 by hand).
         """
         return await guarded(
             lambda: service.upload_asset(
@@ -1103,7 +1112,10 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         Returns the updated pin. Fails with not_found for an unknown id,
         conflict (pin_publishing) while the pin is mid-publish, and
         field_not_clearable when sending an empty value for a published pin.
-        A new board is preflighted like create_pin.
+        A new board is preflighted like create_pin. Until Pinterest enables pin
+        editing for PinBridge, a published pin fails with
+        pinterest_feature_unavailable; the account is fine, so do not suggest a
+        reconnect. Offer delete_pin plus a new create_pin instead.
         """
         return await guarded(
             lambda: service.update_pin(
@@ -1290,8 +1302,10 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         tick. To change the board or account first, use retry_pin on the linked
         pin_id; for a failed pin created directly, use retry_pin.
 
-        Returns the schedule with status "scheduled". Fails with not_found for
-        an unknown id and bad_request when the schedule is not failed.
+        Returns the schedule with status "queued" when its linked pin is
+        re-published right away, or "scheduled" when the scheduler will pick it
+        up. Fails with not_found for an unknown id and bad_request when the
+        schedule is not failed.
         """
         return await guarded(lambda: service.retry_schedule(schedule_id))
 
@@ -1318,7 +1332,13 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         description: Annotated[str | None, Field(description="Board description.")] = None,
         privacy: Annotated[
             Literal["PUBLIC", "SECRET"] | None,
-            Field(description='"PUBLIC" (default) or "SECRET".'),
+            Field(
+                description=(
+                    '"PUBLIC" (default) or "SECRET". SECRET needs a Pinterest permission '
+                    "PinBridge connections do not include and fails with "
+                    "pinterest_not_permitted."
+                )
+            ),
         ] = None,
     ) -> dict:
         """Create a new board on a connected Pinterest account.
@@ -1329,8 +1349,9 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
         Returns the board with id (use as board_id), name, description,
         privacy. Fails with forbidden (sandbox_board_limit) when a sandbox
-        project hits its board cap and with token_expired / scope_missing when
-        the Pinterest connection needs a reconnect.
+        project hits its board cap, pinterest_not_permitted for SECRET boards,
+        and token_expired / scope_missing when the Pinterest connection needs a
+        reconnect.
         """
         return await guarded(
             lambda: service.create_board(
@@ -1347,7 +1368,13 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         ] = None,
         description: Annotated[str | None, Field(description="New board description.")] = None,
         privacy: Annotated[
-            Literal["PUBLIC", "SECRET"] | None, Field(description='"PUBLIC" or "SECRET".')
+            Literal["PUBLIC", "SECRET"] | None,
+            Field(
+                description=(
+                    '"PUBLIC" or "SECRET". SECRET fails with pinterest_not_permitted: '
+                    "PinBridge connections lack the Pinterest permission for it."
+                )
+            ),
         ] = None,
     ) -> dict:
         """Rename a board or change its description or privacy on Pinterest.
@@ -1358,8 +1385,9 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
         Returns the updated board (id, name, description, privacy). Fails with
         board_not_found for an unknown board, forbidden when sandbox board
-        writes are blocked, and token_expired / scope_missing when the
-        Pinterest connection needs a reconnect.
+        writes are blocked, pinterest_not_permitted for SECRET, and
+        token_expired / scope_missing when the Pinterest connection needs a
+        reconnect.
         """
         return await guarded(
             lambda: service.update_board(
@@ -1373,10 +1401,14 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
     @tool(DESTRUCTIVE, "Delete board")
     async def delete_board(board_id: BoardId, account_id: AccountId) -> dict:
-        """Delete a Pinterest board and every pin on it. Irreversible; confirm first.
+        """Remove a board. Confirm first.
 
-        Use only when the whole board should go. To fix one wrong pin use
-        update_pin or delete_pin instead.
+        In a production project the board is only removed from PinBridge (it
+        leaves list_boards and cannot be published to); it stays on Pinterest
+        with its pins, so tell the user to delete it on Pinterest if they want
+        it gone there. In a sandbox project the board and its pins are deleted
+        on Pinterest's sandbox, which is irreversible. Use only when the whole
+        board should go. To fix one wrong pin use update_pin or delete_pin.
 
         Returns {"deleted": true, "board_id": "<id>"}. Fails with
         board_not_found for an unknown board, forbidden when sandbox board
