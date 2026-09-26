@@ -204,6 +204,15 @@ PinDetail = Annotated[
         )
     ),
 ]
+IncludeDaily = Annotated[
+    bool | None,
+    Field(
+        description=(
+            "false: return only the range totals, with an empty daily list. Use it when the "
+            "totals are all you need, e.g. over 90 days. Default: true."
+        )
+    ),
+]
 RemovedFilter = Annotated[
     bool | None,
     Field(
@@ -689,6 +698,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         end_date: EndDate = None,
         metrics: Metrics = None,
         source: AnalyticsSource = None,
+        include_daily: IncludeDaily = None,
     ) -> dict:
         """Pinterest performance metrics for one published pin over a date range.
 
@@ -698,17 +708,25 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
         Returns pin_id, pinterest_pin_id, account_id, start_date, end_date,
         provider_mode, totals (each metric summed over the range, lowercase
-        names; total_comments and total_reactions are lifetime counts), daily
-        rows, source (stored or live) and data_as_of for stored reads. A pin
-        deleted on Pinterest is answered from stored history with
-        removed_from_pinterest_at set, and fails with pin_removed_on_pinterest
-        when none is stored. Fails with not_found for an unknown pin and with
-        pin_not_published for a pin that has not published yet; sandbox pins
-        return zeroed metrics.
+        names), daily rows (empty with include_daily=false; pass that when the
+        totals are enough), source (stored or live) and data_as_of for stored
+        reads. total_comments and total_reactions are lifetime counts on live
+        reads and 0 on stored reads, which do not keep them: use source=live
+        for comments and reactions. They read 0 on every daily row, since
+        Pinterest does not report them per day. A pin deleted on Pinterest is answered from stored
+        history with removed_from_pinterest_at set, and fails with
+        pin_removed_on_pinterest when none is stored. Fails with not_found for
+        an unknown pin and with pin_not_published for a pin that has not
+        published yet; sandbox pins return zeroed metrics.
         """
         return await guarded(
             lambda: service.get_pin_analytics(
-                pin_id, start_date=start_date, end_date=end_date, metrics=metrics, source=source
+                pin_id,
+                start_date=start_date,
+                end_date=end_date,
+                metrics=metrics,
+                source=source,
+                include_daily=include_daily,
             )
         )
 
@@ -719,6 +737,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         end_date: EndDate = None,
         metrics: Metrics = None,
         source: AnalyticsSource = None,
+        include_daily: IncludeDaily = None,
     ) -> dict:
         """Pinterest performance metrics for a whole connected account over a date range.
 
@@ -727,14 +746,20 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         headroom use get_rate_meter.
 
         Returns account_id, start_date, end_date, provider_mode, totals,
-        daily rows, and source (stored or live) with data_as_of for stored
+        daily rows (empty with include_daily=false; pass that when the totals
+        are enough), and source (stored or live) with data_as_of for stored
         reads. Fails with not_found for an unknown account and with
         token_expired / scope_missing when the Pinterest connection needs a
         reconnect.
         """
         return await guarded(
             lambda: service.get_account_analytics(
-                account_id, start_date=start_date, end_date=end_date, metrics=metrics, source=source
+                account_id,
+                start_date=start_date,
+                end_date=end_date,
+                metrics=metrics,
+                source=source,
+                include_daily=include_daily,
             )
         )
 
@@ -819,14 +844,16 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         individual failed pins use list_pins with status=failed.
 
         Returns start, end, timezone, granularity (hour | day), pins (total,
-        by_status, success_rate from 0 to 1), previous_pins (same figures for
-        the preceding period of equal length), series (created / published /
+        submitted, by_status, success_rate from 0 to 1), previous_pins (same
+        figures for the preceding period of equal length), series (created / published /
         failed per bucket), published_by_account, queue (queued, deferred,
         publishing right now), schedules (by_status in the range, upcoming) and
         import_jobs (null when filtered by account). Outcomes count by when
         they happened: published by publish time, failed by failure time (for
-        pins still failed); pins.total and series.created count pins submitted
-        in the range. Fails with invalid_date_range (start not before end, or
+        pins still failed); pins.total is the sum of by_status, and
+        pins.submitted and series.created count pins submitted in the range
+        (API 1.38+; older APIs report submissions in pins.total and omit
+        pins.submitted). Fails with invalid_date_range (start not before end, or
         more than 366 days), invalid_timezone, or account_not_permitted for an
         account outside the key's allow-list.
         """
