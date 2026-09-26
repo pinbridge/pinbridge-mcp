@@ -534,9 +534,17 @@ class PinBridgeService:
         end_date: str | None = None,
         metrics: str | None = None,
         source: str | None = None,
+        include_daily: bool | None = None,
     ) -> dict[str, Any]:
+        daily = None if include_daily is None else ("true" if include_daily else "false")
         params = _clean(
-            {"start_date": start_date, "end_date": end_date, "metrics": metrics, "source": source}
+            {
+                "start_date": start_date,
+                "end_date": end_date,
+                "metrics": metrics,
+                "source": source,
+                "include_daily": daily,
+            }
         )
         async with self.client() as client:
             response = await client.request(
@@ -552,9 +560,17 @@ class PinBridgeService:
         end_date: str | None = None,
         metrics: str | None = None,
         source: str | None = None,
+        include_daily: bool | None = None,
     ) -> dict[str, Any]:
+        daily = None if include_daily is None else ("true" if include_daily else "false")
         params = _clean(
-            {"start_date": start_date, "end_date": end_date, "metrics": metrics, "source": source}
+            {
+                "start_date": start_date,
+                "end_date": end_date,
+                "metrics": metrics,
+                "source": source,
+                "include_daily": daily,
+            }
         )
         async with self.client() as client:
             response = await client.request(

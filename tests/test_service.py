@@ -373,6 +373,10 @@ def test_analytics_pass_the_source() -> None:
         assert _last_request()["params"] == {"start_date": "2026-09-01", "source": "live"}
         await service.get_pin_analytics("pin_1")
         assert _last_request()["params"] == {}
+        await service.get_pin_analytics("pin_1", include_daily=False)
+        assert _last_request()["params"] == {"include_daily": "false"}
+        await service.get_account_analytics("acct_1", include_daily=True)
+        assert _last_request()["params"] == {"include_daily": "true"}
 
     asyncio.run(run())
 
