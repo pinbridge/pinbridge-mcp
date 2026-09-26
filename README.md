@@ -39,9 +39,9 @@ Write tools (registered when `PINBRIDGE_MCP_ENABLE_WRITE_TOOLS=true`):
 | Area | Tools |
 |---|---|
 | Media | `upload_asset` (base64 or a public URL the server downloads; returns an `asset_id`) |
-| Pins | `create_pin` (`dry_run` runs every API check, publishes nothing), `create_pins_batch`, `update_pin`, `delete_pin` (Pinterest-side by default), `retry_pin` |
+| Pins | `create_pin` (`dry_run` runs every API check, publishes nothing), `create_pins_batch`, `update_pin` (only before a pin publishes; published pins cannot be edited), `delete_pin` (Pinterest-side by default), `retry_pin` |
 | Schedules | `create_schedule` (`dry_run`), `update_schedule` (edit a pending schedule in place), `cancel_schedule`, `retry_schedule` (failed → scheduled), `delete_schedule` (finished schedules only) |
-| Boards | `create_board`, `update_board` (name / description / privacy), `delete_board` |
+| Boards | `create_board`, `update_board` (name / description / privacy; `SECRET` needs a connection made with `boards:write_secret`), `delete_board` (deletes the board and its pins on Pinterest) |
 | Webhooks | `create_webhook`, `update_webhook` (partial; pause with `is_enabled=false`), `delete_webhook` |
 
 ### Lists and paging
