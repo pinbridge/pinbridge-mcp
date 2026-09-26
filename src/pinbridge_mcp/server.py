@@ -303,7 +303,9 @@ WORKFLOW (use the publish_pin prompt for the full sequence)
   3. Need an image the internet cannot fetch? upload_asset(...) → asset_id
   4. create_pin(..., dry_run=true) to preflight for free (nothing is published)
   5. create_pin(...) / create_schedule(...) / create_pins_batch(...)
-  6. get_pin_analytics(pin_id) after publishing; update_pin / delete_pin to fix a mistake
+  6. get_pin_analytics(pin_id) after publishing. Fix a mistake with update_pin BEFORE the
+     pin publishes; a published pin cannot be edited, only deleted (delete_pin) and
+     published again
   7. Wrong time or board on a pending schedule? update_schedule(...) edits it in place;
      never cancel + recreate for a small fix
 
@@ -351,8 +353,13 @@ ERRORS
   about THIS API key's grants (ask a workspace admin for a wider key);
   scope_missing / token_expired / token_revoked are about the connected
   Pinterest account (reconnect it in the PinBridge dashboard). Board codes:
-  board_not_found, board_not_owned, board_deleted, board_access_denied. Others:
-  quota_exceeded, rate_limited (has retry_after_seconds), validation_error.
+  board_not_found, board_not_owned, board_deleted, board_access_denied.
+  pin_already_published: published pins cannot be edited (Pinterest's API does
+  not allow it); offer delete_pin plus a new create_pin. Two codes are Pinterest
+  refusing the action itself, so reconnecting does NOT help:
+  pinterest_feature_unavailable and pinterest_not_permitted. invalid_image means
+  the file is broken: upload a valid one. Others: quota_exceeded, rate_limited
+  (has retry_after_seconds), validation_error.
   Prefer a dry run (or check_board_access after a board failure) over retrying blind.
 
 WRITE TOOLS
@@ -390,8 +397,10 @@ PUBLISH_PIN_STEPS = """Publish one pin with PinBridge, in this order:
    wait rather than resubmitting. On failed, read error_code/error_message;
    retry_pin can move it to another board or account.
 9. Later, get_pin_analytics(pin_id) reports impressions, saves and clicks. A wrong
-   pin is fixed with update_pin (title/description/link/alt_text/board) or
-   delete_pin, never by deleting the board."""
+   pin that has not published yet is fixed with update_pin
+   (title/description/link/alt_text/board). A published pin cannot be edited:
+   after the user confirms, delete_pin it and publish a corrected pin. Never
+   delete the board to remove one pin."""
 
 
 def create_mcp_server(settings: Settings | None = None) -> FastMCP:
@@ -981,7 +990,9 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         Returns id (use as asset_id), public_url, asset_type, content_type,
         size_bytes, created_at. Files are capped at 200 MB (plans cap lower).
         Fails with payment_required on plans without uploaded_media_assets
-        (see get_billing_status) and validation_error for unsupported media.
+        (see get_billing_status), validation_error for unsupported media, and
+        invalid_image when the file is truncated or corrupted (re-encode the
+        exact original bytes; never retype base64 by hand).
         """
         return await guarded(
             lambda: service.upload_asset(
@@ -1082,7 +1093,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @tool(WRITE, "Update pin")
+    @tool(WRITE, "Update unpublished pin")
     async def update_pin(
         pin_id: PinId,
         title: OptionalTitle = None,
@@ -1093,17 +1104,21 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         ] = None,
         board_id: OptionalBoardId = None,
     ) -> dict:
-        """Edit a pin's title, description, link, alt text or board in place.
+        """Edit a pin that has NOT been published yet: title, description, link, alt text or board.
 
-        Use to fix a typo or move a pin instead of deleting and reposting: a
-        published pin is updated on Pinterest and keeps its engagement. To
-        change the image use delete_pin then create_pin; for a failed pin use
-        retry_pin. Pass at least one field.
+        Use to fix a typo, link or board before the pin publishes: queued,
+        deferred and failed pins then publish with the new values. Published
+        pins cannot be edited: Pinterest's API does not allow PinBridge to
+        change a pin once it is live, so the call fails with
+        pin_already_published. For a published pin, offer delete_pin plus a
+        new create_pin (confirm first). To change the image use delete_pin then
+        create_pin; for a failed pin on a bad board use retry_pin. Pass at
+        least one field.
 
-        Returns the updated pin. Fails with not_found for an unknown id,
-        conflict (pin_publishing) while the pin is mid-publish, and
-        field_not_clearable when sending an empty value for a published pin.
-        A new board is preflighted like create_pin.
+        Returns the updated pin. Fails with pin_already_published for a
+        published pin, not_found for an unknown id, and conflict
+        (pin_publishing) while the pin is mid-publish. A new board is
+        preflighted like create_pin.
         """
         return await guarded(
             lambda: service.update_pin(
@@ -1131,8 +1146,10 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
     ) -> dict:
         """Delete one pin, from Pinterest too by default. Irreversible; confirm first.
 
-        Use for a pin that should not exist. For a wrong title, link or board
-        use update_pin instead, and never use delete_board to remove one pin.
+        Use for a pin that should not exist, or to replace a published pin that
+        needs a correction (published pins cannot be edited). Before a pin
+        publishes, fix it with update_pin instead. Never use delete_board to
+        remove one pin.
 
         Returns id, deleted, removed_from_pinterest, pinterest_pin_id and
         reason when nothing was removed upstream (not_published,
@@ -1160,8 +1177,9 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
         Use only for pins whose status is failed: pass board_id when the
         original board was deleted or inaccessible (check_board_access says
-        why), or account_id when the original account needs a reconnect. For a
-        published pin use update_pin; for a failed schedule use retry_schedule.
+        why), or account_id when the original account needs a reconnect.
+        Published pins cannot be edited or retried; for a failed schedule use
+        retry_schedule.
 
         Returns the pin re-queued with status "queued"; poll get_pin. The new
         board is preflighted like create_pin. Fails with not_found for an
@@ -1241,8 +1259,8 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         Use to fix a wrong run_at, board, title or link on a schedule that has
         not started publishing, instead of cancel_schedule plus
         create_schedule; the id and history are kept. Once the schedule has
-        run, edit the resulting pin with update_pin; for a failed one use
-        retry_schedule. Pass at least one field.
+        run its pin is published and can no longer be edited; for a failed one
+        use retry_schedule. Pass at least one field.
 
         Returns the updated schedule, still in status "scheduled". A new board
         is preflighted like create_schedule. Fails with not_found for an
@@ -1290,8 +1308,10 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         tick. To change the board or account first, use retry_pin on the linked
         pin_id; for a failed pin created directly, use retry_pin.
 
-        Returns the schedule with status "scheduled". Fails with not_found for
-        an unknown id and bad_request when the schedule is not failed.
+        Returns the schedule with status "queued" when its linked pin is
+        re-published right away, or "scheduled" when the scheduler will pick it
+        up. Fails with not_found for an unknown id and bad_request when the
+        schedule is not failed.
         """
         return await guarded(lambda: service.retry_schedule(schedule_id))
 
@@ -1318,7 +1338,13 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         description: Annotated[str | None, Field(description="Board description.")] = None,
         privacy: Annotated[
             Literal["PUBLIC", "SECRET"] | None,
-            Field(description='"PUBLIC" (default) or "SECRET".'),
+            Field(
+                description=(
+                    '"PUBLIC" (default) or "SECRET". SECRET needs the account to be '
+                    "connected with Pinterest's boards:write_secret permission; older "
+                    "connections fail with scope_missing until reconnected."
+                )
+            ),
         ] = None,
     ) -> dict:
         """Create a new board on a connected Pinterest account.
@@ -1329,8 +1355,10 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
         Returns the board with id (use as board_id), name, description,
         privacy. Fails with forbidden (sandbox_board_limit) when a sandbox
-        project hits its board cap and with token_expired / scope_missing when
-        the Pinterest connection needs a reconnect.
+        project hits its board cap, and token_expired / scope_missing when the
+        Pinterest connection needs a reconnect (scope_missing with
+        missing_scopes ["boards:write_secret"] for SECRET on an account connected
+        before secret boards were supported).
         """
         return await guarded(
             lambda: service.create_board(
@@ -1347,19 +1375,28 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         ] = None,
         description: Annotated[str | None, Field(description="New board description.")] = None,
         privacy: Annotated[
-            Literal["PUBLIC", "SECRET"] | None, Field(description='"PUBLIC" or "SECRET".')
+            Literal["PUBLIC", "SECRET"] | None,
+            Field(
+                description=(
+                    '"PUBLIC" or "SECRET". SECRET needs the boards:write_secret '
+                    "permission; older connections fail with scope_missing until "
+                    "reconnected."
+                )
+            ),
         ] = None,
     ) -> dict:
         """Rename a board or change its description or privacy on Pinterest.
 
         Use for board housekeeping; pins on the board are untouched. To move a
-        pin between boards use update_pin; to remove a board use delete_board.
+        pin that has not published between boards use update_pin; to remove a
+        board use delete_board.
         Pass at least one of name, description or privacy.
 
         Returns the updated board (id, name, description, privacy). Fails with
         board_not_found for an unknown board, forbidden when sandbox board
         writes are blocked, and token_expired / scope_missing when the
-        Pinterest connection needs a reconnect.
+        Pinterest connection needs a reconnect (including SECRET on an account
+        connected without boards:write_secret).
         """
         return await guarded(
             lambda: service.update_board(
@@ -1373,15 +1410,17 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
     @tool(DESTRUCTIVE, "Delete board")
     async def delete_board(board_id: BoardId, account_id: AccountId) -> dict:
-        """Delete a Pinterest board and every pin on it. Irreversible; confirm first.
+        """Delete a board on Pinterest together with every pin on it. Irreversible; confirm first.
 
-        Use only when the whole board should go. To fix one wrong pin use
-        update_pin or delete_pin instead.
+        Use only when the whole board should go; to remove one pin use
+        delete_pin. PinBridge keeps its records of the board's published pins
+        and flags them removed_from_pinterest_at.
 
         Returns {"deleted": true, "board_id": "<id>"}. Fails with
         board_not_found for an unknown board, forbidden when sandbox board
-        writes are blocked, and insufficient_scope without the destructive
-        scope.
+        writes are blocked, insufficient_scope without the destructive scope,
+        and token_expired / scope_missing when the Pinterest connection needs a
+        reconnect.
         """
         return await guarded(lambda: service.delete_board(board_id, account_id=account_id))
 
