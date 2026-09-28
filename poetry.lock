@@ -485,14 +485,14 @@ files = [
 
 [[package]]
 name = "pinbridge-sdk"
-version = "1.9.0"
+version = "1.10.1"
 description = "Official Python SDK for the PinBridge API"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "pinbridge_sdk-1.9.0-py3-none-any.whl", hash = "sha256:0207e99d7b7962d6f64bd854f85d717ee8313e8abf729feb4fb18e707e4f9657"},
-    {file = "pinbridge_sdk-1.9.0.tar.gz", hash = "sha256:6643a46f92252b09b71d048a14acee957848381e9352f1795703ff23cfba78c3"},
+    {file = "pinbridge_sdk-1.10.1-py3-none-any.whl", hash = "sha256:184437750026c9be2fc2c73eb0020efd6107fa7429eeaddd13e1c4dbce308469"},
+    {file = "pinbridge_sdk-1.10.1.tar.gz", hash = "sha256:d4f33c4a21ab4c962ffed1237de5af6f4339fcaeae200c32d66145ba106f9fbf"},
 ]
 
 [package.dependencies]
@@ -1156,4 +1156,4 @@ standard = ["colorama (>=0.4) ; sys_platform == \"win32\"", "httptools (>=0.6.3)
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.12"
-content-hash = "22f7f03a2cb6de4810e7372baa5124cef15cee393ffce5e32a61253e453bc2fd"
+content-hash = "f1d9caa331f444b694979250abed66ea4e7f18b125263b13ba352589c1601342"
