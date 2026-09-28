@@ -322,6 +322,12 @@ class PinBridgeService:
             asset = await uploader(data, filename=filename, content_type=content_type)
         return _dump(asset)
 
+    async def delete_asset(self, asset_id: str, *, confirm: bool = False) -> dict[str, Any]:
+        """Delete an uploaded asset; without ``confirm`` the API refuses one pins still use."""
+        async with self.client() as client:
+            outcome = await client.assets.delete(asset_id, confirm=confirm)
+        return {"asset_id": asset_id, **_dump(outcome)}
+
     # ------------------------------------------------------------------ pins
 
     async def list_pins(

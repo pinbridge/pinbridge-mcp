@@ -27,6 +27,7 @@ READ_ONLY_TOOLS = {
 }
 WRITE_TOOLS = {
     "upload_asset",
+    "delete_asset",
     "create_pin",
     "create_pins_batch",
     "update_pin",
@@ -44,7 +45,15 @@ WRITE_TOOLS = {
     "update_webhook",
     "delete_webhook",
 }
-DESTRUCTIVE_TOOLS = {"delete_pin", "delete_board", "delete_webhook", "delete_schedule"}
+DESTRUCTIVE_TOOLS = {
+    "delete_asset",
+    "delete_pin",
+    "delete_board",
+    "delete_webhook",
+    "delete_schedule",
+}
+# Writes that only change PinBridge's own records, never Pinterest or an outside URL.
+CLOSED_WORLD_WRITE_TOOLS = {"delete_asset", "cancel_schedule", "delete_schedule", "delete_webhook"}
 
 
 def _tools(enable_write_tools: bool) -> dict[str, object]:
@@ -70,9 +79,9 @@ def test_open_world_hint_marks_only_tools_that_leave_the_workspace() -> None:
     # Pinterest's public keyword data is the one read outside the caller's workspace.
     for name in READ_ONLY_TOOLS:
         assert tools[name].annotations.openWorldHint is (name == "list_related_terms"), name
-    # Every write publishes to or changes Pinterest, or delivers to an outside URL.
+    # Every other write publishes to or changes Pinterest, or delivers to an outside URL.
     for name in WRITE_TOOLS:
-        assert tools[name].annotations.openWorldHint is True, name
+        assert tools[name].annotations.openWorldHint is (name not in CLOSED_WORLD_WRITE_TOOLS), name
 
 
 def test_protected_resource_metadata_advertises_scope() -> None:
@@ -100,7 +109,13 @@ def test_write_server_registers_every_roadmap_tool_with_annotations() -> None:
     for name in ("create_pin", "create_pins_batch", "create_schedule", "upload_asset"):
         assert tools[name].annotations.idempotentHint is False, name
     assert tools["update_pin"].annotations.idempotentHint is True
-    for name in ("retry_schedule", "update_webhook", "update_schedule", "update_board"):
+    for name in (
+        "retry_schedule",
+        "update_webhook",
+        "update_schedule",
+        "update_board",
+        "delete_asset",
+    ):
         assert tools[name].annotations.idempotentHint is True, name
 
 

@@ -293,6 +293,14 @@ WRITE_NON_IDEMPOTENT = ToolAnnotations(
 DESTRUCTIVE = ToolAnnotations(
     readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=True
 )
+# Writes that only change PinBridge's own records (a schedule, a webhook, an uploaded
+# file) and never reach Pinterest or an outside URL.
+WRITE_LOCAL = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+)
+DESTRUCTIVE_LOCAL = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+)
 
 INSTRUCTIONS = """PinBridge MCP server — manage Pinterest publishing through the PinBridge API.
 
@@ -372,7 +380,7 @@ ERRORS
   Prefer a dry run (or check_board_access after a board failure) over retrying blind.
 
 WRITE TOOLS
-  upload_asset, create_pin, create_pins_batch, update_pin, delete_pin, retry_pin,
+  upload_asset, delete_asset, create_pin, create_pins_batch, update_pin, delete_pin, retry_pin,
   create_schedule, update_schedule, cancel_schedule, retry_schedule, delete_schedule,
   create_board, update_board, delete_board, create_webhook, update_webhook,
   delete_webhook are only registered when the server has write tools enabled.
@@ -1031,6 +1039,37 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
+    @tool(DESTRUCTIVE_LOCAL, "Delete uploaded asset")
+    async def delete_asset(
+        asset_id: Annotated[
+            str, Field(description="UUID of the uploaded asset, from upload_asset.")
+        ],
+        confirm: Annotated[
+            bool,
+            Field(
+                description=(
+                    "false (default) deletes nothing while pins or pending scheduled pins "
+                    "use the asset and reports how many; true deletes it anyway and detaches it."
+                )
+            ),
+        ] = False,
+    ) -> dict:
+        """Delete an uploaded image or video from PinBridge storage. Irreversible; confirm first.
+
+        Use to clean up media from upload_asset that is no longer needed; its
+        public_url stops working. Published pins keep their image on Pinterest.
+        With confirm=true, a pin or scheduled pin that has not published yet
+        and uses the asset fails to publish, so tell the user which ones first.
+
+        Returns asset_id, deleted, requires_confirmation, referenced_pin_count
+        (pins plus scheduled pins that have not run yet) and freed_bytes. With
+        confirm=false and the asset still in use, nothing is deleted: deleted
+        is false and requires_confirmation true.
+        Fails with not_found for an unknown id and insufficient_scope without
+        the destructive scope.
+        """
+        return await guarded(lambda: service.delete_asset(asset_id, confirm=confirm))
+
     @tool(WRITE_NON_IDEMPOTENT, "Publish pin")
     async def create_pin(
         account_id: AccountId,
@@ -1311,7 +1350,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @tool(WRITE, "Cancel scheduled pin")
+    @tool(WRITE_LOCAL, "Cancel scheduled pin")
     async def cancel_schedule(schedule_id: ScheduleId) -> dict:
         """Cancel a pending scheduled pin so it never publishes.
 
@@ -1330,19 +1369,20 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         """Re-queue a schedule whose publish failed.
 
         Use for schedules in failed status (list_schedules with
-        status="failed"). The schedule and its linked pin return to a runnable
-        state; a run_at already in the past publishes at the next scheduler
-        tick. To change the board or account first, use retry_pin on the linked
-        pin_id; for a failed pin created directly, use retry_pin.
+        status="failed"). To change the board or account first, use retry_pin
+        on the linked pin_id; for a failed pin created directly, use retry_pin.
 
-        Returns the schedule with status "queued" when its linked pin is
-        re-published right away, or "scheduled" when the scheduler will pick it
-        up. Fails with not_found for an unknown id and bad_request when the
-        schedule is not failed.
+        Returns the schedule. Its status is usually "queued": a schedule that
+        failed while publishing has a linked pin_id, and that pin is
+        re-published right away. It is "scheduled" only when the schedule
+        failed before any pin was created; the scheduler then runs it at
+        run_at, or on its next tick when run_at has passed. Fails with
+        not_found for an unknown id and bad_request when the schedule is not
+        failed.
         """
         return await guarded(lambda: service.retry_schedule(schedule_id))
 
-    @tool(DESTRUCTIVE, "Delete scheduled pin")
+    @tool(DESTRUCTIVE_LOCAL, "Delete scheduled pin")
     async def delete_schedule(schedule_id: ScheduleId) -> dict:
         """Delete a finished schedule record (status done, failed or canceled). Irreversible.
 
@@ -1520,7 +1560,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @tool(DESTRUCTIVE, "Delete webhook")
+    @tool(DESTRUCTIVE_LOCAL, "Delete webhook")
     async def delete_webhook(webhook_id: WebhookId) -> dict:
         """Delete a webhook endpoint; deliveries stop immediately. Irreversible.
 
