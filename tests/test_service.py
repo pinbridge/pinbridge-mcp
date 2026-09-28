@@ -76,6 +76,7 @@ class _FakePins:
 class _FakeAssets:
     def __init__(self) -> None:
         self.uploads: list[tuple[str, bytes, str | None, str | None]] = []
+        self.deleted: list[tuple[str, bool]] = []
 
     async def upload_image(self, data: bytes, *, filename: str, content_type: str | None):
         self.uploads.append(("image", data, filename, content_type))
@@ -84,6 +85,27 @@ class _FakeAssets:
     async def upload_video(self, data: bytes, *, filename: str, content_type: str | None):
         self.uploads.append(("video", data, filename, content_type))
         return _FakeModel({"id": "asset_2", "asset_type": "video"})
+
+    async def delete(self, asset_id: str, *, confirm: bool = False):
+        self.deleted.append((asset_id, confirm))
+        in_use = asset_id == "asset_in_use"
+        if in_use and not confirm:
+            return _FakeModel(
+                {
+                    "deleted": False,
+                    "requires_confirmation": True,
+                    "referenced_pin_count": 2,
+                    "freed_bytes": 0,
+                }
+            )
+        return _FakeModel(
+            {
+                "deleted": True,
+                "requires_confirmation": False,
+                "referenced_pin_count": 2 if in_use else 0,
+                "freed_bytes": 1024,
+            }
+        )
 
 
 class _FakeWebhooks:
@@ -719,6 +741,33 @@ def test_host_is_public_rejects_private_and_accepts_global(monkeypatch) -> None:
     monkeypatch.setattr("pinbridge_mcp.service.socket.getaddrinfo", fake_getaddrinfo)
     assert _host_is_public("private.internal") is False
     assert _host_is_public("public.example") is True
+
+
+def test_delete_asset_refuses_in_use_asset_until_confirmed() -> None:
+    service = _service()
+
+    async def run() -> None:
+        unused = await service.delete_asset("asset_1")
+        assert unused == {
+            "asset_id": "asset_1",
+            "deleted": True,
+            "requires_confirmation": False,
+            "referenced_pin_count": 0,
+            "freed_bytes": 1024,
+        }
+        refused = await service.delete_asset("asset_in_use")
+        assert refused["deleted"] is False
+        assert refused["requires_confirmation"] is True
+        assert refused["referenced_pin_count"] == 2
+        forced = await service.delete_asset("asset_in_use", confirm=True)
+        assert forced["deleted"] is True
+        assert [client.assets.deleted for client in _FakeClient.instances] == [
+            [("asset_1", False)],
+            [("asset_in_use", False)],
+            [("asset_in_use", True)],
+        ]
+
+    asyncio.run(run())
 
 
 def test_webhook_create_and_delete() -> None:
