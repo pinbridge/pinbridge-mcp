@@ -19,7 +19,7 @@ This README covers the server itself: tools, auth, configuration and self-hostin
 - the full publishing loop: upload → dry run → publish → measure → edit / delete / retry
 - MCP annotations on every tool, resources for accounts and boards, and a `publish_pin` prompt
 
-The server is workspace-scoped: the API key (or the key minted by OAuth) resolves to one workspace and one project. Connecting or disconnecting a Pinterest account is deliberately not exposed: connecting needs a person to approve Pinterest's OAuth grant in a browser, and disconnecting drops every pending schedule on the account. Both live in the [dashboard](https://app.pinbridge.io), and the server instructions tell agents so.
+The server is workspace-scoped: the API key (or the key minted by OAuth) resolves to one workspace and one project. Connecting or disconnecting a Pinterest account is deliberately not exposed: connecting needs a person to approve Pinterest's OAuth grant in a browser, and disconnecting drops every pending schedule on the account. Both live in the [dashboard](https://app.pinbridge.io), and the server instructions tell agents so. When nothing is connected, `list_pinterest_accounts` returns a `connect_url` (the dashboard's connect step) and a `next_step` telling the agent to share it.
 
 ## Tools
 
@@ -97,7 +97,7 @@ The token is passed through to the PinBridge API; the server keeps no credential
 
 **OAuth.** With no header, an OAuth-capable client discovers the authorization server through `/.well-known/oauth-protected-resource` (RFC 9728), which points at the PinBridge API. The API implements OAuth 2.1 with dynamic client registration; the user signs in, picks a workspace, and the resulting token is a PinBridge API key that shows up in their key list and can be revoked like any other. The [setup guide](https://www.pinbridge.io/docs/mcp/setup/) walks through it for Claude.
 
-**Plan gate and quota.** `PINBRIDGE_MCP_MIN_PLAN` rejects keys whose workspace plan is below the minimum. With `PINBRIDGE_MCP_ENABLE_QUOTA=true` every streamable-HTTP request (tool calls and resource reads alike) is checked against the workspace's weekly MCP quota via the API and counted afterwards; an exhausted quota answers `429` with the reset time. Quota checks fail open if the API is unreachable.
+**Plan gate and quota.** `PINBRIDGE_MCP_MIN_PLAN` rejects keys whose workspace plan is below the minimum. With `PINBRIDGE_MCP_ENABLE_QUOTA=true` every tool call is checked against the workspace's weekly assistant-request quota via the API and counted afterwards. The handshake, tool listing and resource reads are never counted. Once the week's requests are used up, a tool call fails with the API's upgrade message (the plan that lifts the limit and a pricing link), so the assistant can show it to the person. Quota checks fail open if the API is unreachable.
 
 For local `stdio` use, set `PINBRIDGE_MCP_PINBRIDGE_API_KEY` instead.
 
@@ -116,7 +116,8 @@ All settings are environment variables prefixed `PINBRIDGE_MCP_` (a `.env` file 
 | `STREAMABLE_HTTP_PATH` | `/` | Where the MCP endpoint is mounted |
 | `ENABLE_WRITE_TOOLS` | `false` | Register the write tools |
 | `MIN_PLAN` | `free` | Lowest workspace plan allowed to connect |
-| `ENABLE_QUOTA` | `true` | Enforce the weekly MCP request quota through the API |
+| `APP_BASE_URL` | `https://app.pinbridge.io` | PinBridge web app, for the links people open (connect Pinterest, pricing) |
+| `ENABLE_QUOTA` | `true` | Enforce the weekly assistant-request quota (per tool call) through the API |
 | `LOG_LEVEL` | `INFO` | Python log level |
 
 ## Run locally

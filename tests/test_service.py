@@ -247,7 +247,8 @@ def test_service_uses_bound_request_api_key() -> None:
 
     async def run() -> None:
         accounts = await service.list_pinterest_accounts()
-        assert accounts == [{"id": "acct_1", "username": "demo"}]
+        assert accounts["items"] == [{"id": "acct_1", "username": "demo"}]
+        assert accounts["next_step"] is None
         assert _FakeClient.instances[-1].kwargs["api_key"] == "pb_test_123"
 
     try:
@@ -436,7 +437,7 @@ def test_list_pinterest_accounts_keeps_the_health_fields() -> None:
         )
 
     service = PinBridgeService(Settings(pinbridge_api_key="pb_test"), client_factory=factory)
-    (result,) = asyncio.run(service.list_pinterest_accounts())
+    (result,) = asyncio.run(service.list_pinterest_accounts())["items"]
     for field in (
         "health_status",
         "health_message",
@@ -929,3 +930,64 @@ def test_format_error_surfaces_code_and_remediation() -> None:
     assert (
         PinBridgeService.format_error(plain) == "PinBridge API error (500): Internal server error"
     )
+
+
+def test_empty_account_list_tells_the_assistant_to_share_the_connect_link() -> None:
+    import httpx
+    from pinbridge_sdk import AsyncPinbridgeClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[])
+
+    def factory(**kwargs):  # noqa: ANN003, ANN202
+        return AsyncPinbridgeClient(
+            api_key="pb_test", base_url="https://api.test", transport=httpx.MockTransport(handler)
+        )
+
+    service = PinBridgeService(
+        Settings(pinbridge_api_key="pb_test", app_base_url="https://app.example/"),
+        client_factory=factory,
+    )
+    result = asyncio.run(service.list_pinterest_accounts())
+
+    assert result["items"] == []
+    assert result["connect_url"] == "https://app.example/app?section=get-started&from=assistant"
+    assert result["connect_url"] in result["next_step"]
+
+
+def test_format_error_keeps_the_upgrade_link_for_the_user() -> None:
+    url = "https://app.pinbridge.io/pricing?upgrade=pins_monthly&highlight=starter"
+    error = APIError(
+        status_code=402,
+        message="You've used all 50 pins included in the Playground plan this month.",
+        code=None,
+        details={
+            "error": {
+                "code": "quota_exceeded",
+                "message": "You've used all 50 pins included in the Playground plan this month.",
+                "remediation": f"Upgrade to Starter for 300 pins a month: {url}.",
+                "upgrade_url": url,
+            }
+        },
+    )
+    text = PinBridgeService.format_error(error)
+    assert "[quota_exceeded]" in text
+    assert text.count(url) == 1
+
+
+def test_format_error_adds_a_link_the_remediation_lacks() -> None:
+    url = "https://app.pinbridge.io/app?section=get-started"
+    error = APIError(
+        status_code=404,
+        message="No Pinterest account is connected to this workspace yet.",
+        code=None,
+        details={
+            "error": {
+                "code": "pinterest_not_connected",
+                "message": "No Pinterest account is connected to this workspace yet.",
+                "connect_url": url,
+            }
+        },
+    )
+    text = PinBridgeService.format_error(error)
+    assert text.endswith(f"Connect: {url}")
