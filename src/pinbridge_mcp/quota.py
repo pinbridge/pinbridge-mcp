@@ -1,4 +1,4 @@
-"""DB-backed MCP quota enforcement via the PinBridge API."""
+"""Weekly assistant-request quota, enforced per tool call via the PinBridge API."""
 
 from __future__ import annotations
 
@@ -14,17 +14,27 @@ logger = logging.getLogger(__name__)
 class QuotaClient:
     """Calls /v1/mcp/quota and /v1/mcp/track on the PinBridge API.
 
-    check_and_track() is called on each request:
-      - GET /v1/mcp/quota  → if quota_exhausted, block with 429
-      - POST /v1/mcp/track → fire-and-forget after request proceeds
+    Only tool calls count. Before a tool runs, ``check_quota`` asks the API
+    whether the workspace has requests left this week; once they are used up the
+    tool fails with the API's upgrade message, so the assistant can show the
+    person why and where to upgrade. After the tool runs, ``track_background``
+    adds one to the count. The handshake, tool listing and resource reads are
+    never counted or blocked.
 
     If the API is unreachable, quota checks are skipped (fail open) and
     tracking is best-effort. This keeps the MCP usable even if the API
     has a hiccup.
     """
 
-    def __init__(self, base_url: str, timeout: float = 5.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 5.0,
+        *,
+        app_base_url: str = "https://app.pinbridge.io",
+    ) -> None:
         self._base_url = base_url.rstrip("/")
+        self._app_base_url = app_base_url.rstrip("/")
         self._timeout = timeout
 
     def _headers(self, api_key: str) -> dict[str, str]:
@@ -34,11 +44,30 @@ class QuotaClient:
             "Content-Type": "application/json",
         }
 
+    def _exhausted_message(self, data: dict[str, Any]) -> str:
+        upgrade = data.get("upgrade")
+        if isinstance(upgrade, dict) and upgrade.get("message"):
+            text = str(upgrade["message"])
+            if upgrade.get("remediation"):
+                text += f" {upgrade['remediation']}"
+            return text
+        # API older than 1.46: build the prompt from the counts.
+        used = data.get("requests_used", "?")
+        limit = data.get("requests_limit", "?")
+        resets_at = data.get("resets_at", "?")
+        return (
+            f"This workspace has used all {used}/{limit} assistant requests in its plan "
+            f"this week. Upgrade for more: {self._app_base_url}/pricing?"
+            f"upgrade=assistant_requests_weekly. Or wait until the count resets on "
+            f"Monday {resets_at}."
+        )
+
     async def check_quota(self, api_key: str) -> tuple[bool, str | None]:
         """Check whether the workspace has quota remaining.
 
         Returns (True, None) if quota is available or check fails open.
-        Returns (False, reason) if quota is exhausted.
+        Returns (False, message) once it is used up; the message carries the
+        upgrade link.
         """
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
@@ -49,13 +78,7 @@ class QuotaClient:
             if resp.status_code == 200:
                 data: dict[str, Any] = resp.json()
                 if data.get("quota_exhausted"):
-                    used = data.get("requests_used", "?")
-                    limit = data.get("requests_limit", "?")
-                    resets_at = data.get("resets_at", "?")
-                    return False, (
-                        f"Weekly MCP request quota exceeded ({used}/{limit} requests used). "
-                        f"Quota resets Monday {resets_at}."
-                    )
+                    return False, self._exhausted_message(data)
             else:
                 logger.warning("mcp_quota_check_unexpected_status status=%s", resp.status_code)
         except Exception as exc:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from pinbridge_mcp.config import Settings
 from pinbridge_mcp.server import create_mcp_server
@@ -270,3 +271,83 @@ def test_instructions_explain_paging_and_counting() -> None:
     assert "LISTS AND PAGING" in instructions
     assert "offset = offset + limit" in instructions
     assert "limit=1" in instructions
+
+
+def _quota_server(monkeypatch, *, exhausted: bool) -> tuple[Any, list[str], list[str]]:
+    """A server with the quota on, a bound caller key, and the quota client faked."""
+    checked: list[str] = []
+    tracked: list[str] = []
+
+    async def fake_check(self, api_key):  # noqa: ANN001, ANN202
+        checked.append(api_key)
+        if exhausted:
+            return False, "Used all 100 assistant requests. Upgrade: https://app.test/pricing"
+        return True, None
+
+    def fake_track(self, api_key):  # noqa: ANN001, ANN202
+        tracked.append(api_key)
+
+    async def fake_accounts(self):  # noqa: ANN001, ANN202
+        return {"items": [], "connect_url": "https://app.test/connect", "next_step": "connect"}
+
+    monkeypatch.setattr("pinbridge_mcp.quota.QuotaClient.check_quota", fake_check)
+    monkeypatch.setattr("pinbridge_mcp.quota.QuotaClient.track_background", fake_track)
+    monkeypatch.setattr(
+        "pinbridge_mcp.service.PinBridgeService.list_pinterest_accounts", fake_accounts
+    )
+    mcp = create_mcp_server(Settings(enable_quota=True))
+    return mcp, checked, tracked
+
+
+def test_tool_calls_spend_the_weekly_quota(monkeypatch) -> None:
+    from pinbridge_mcp.auth import bind_current_api_key, reset_current_api_key
+
+    mcp, checked, tracked = _quota_server(monkeypatch, exhausted=False)
+    token = bind_current_api_key("pb_caller")
+    try:
+        asyncio.run(mcp.call_tool("list_pinterest_accounts", {}))
+    finally:
+        reset_current_api_key(token)
+    assert checked == ["pb_caller"]
+    assert tracked == ["pb_caller"]
+
+
+def test_used_up_quota_returns_the_upgrade_message_as_a_tool_error(monkeypatch) -> None:
+    from mcp import types
+
+    from pinbridge_mcp.auth import bind_current_api_key, reset_current_api_key
+
+    mcp, _, tracked = _quota_server(monkeypatch, exhausted=True)
+    handler = mcp._mcp_server.request_handlers[types.CallToolRequest]
+    request = types.CallToolRequest(
+        method="tools/call",
+        params=types.CallToolRequestParams(name="list_pinterest_accounts", arguments={}),
+    )
+    token = bind_current_api_key("pb_caller")
+    try:
+        result = asyncio.run(handler(request)).root
+    finally:
+        reset_current_api_key(token)
+    assert result.isError is True
+    assert "Upgrade: https://app.test/pricing" in result.content[0].text
+    assert tracked == []
+
+
+def test_resource_reads_do_not_spend_the_quota(monkeypatch) -> None:
+    from pinbridge_mcp.auth import bind_current_api_key, reset_current_api_key
+
+    mcp, checked, tracked = _quota_server(monkeypatch, exhausted=True)
+    token = bind_current_api_key("pb_caller")
+    try:
+        contents = asyncio.run(mcp.read_resource("pinbridge://accounts"))
+    finally:
+        reset_current_api_key(token)
+    assert "connect_url" in list(contents)[0].content
+    assert checked == [] and tracked == []
+
+
+def test_instructions_cover_plan_limits_and_the_connect_step() -> None:
+    instructions = create_mcp_server(Settings(pinbridge_api_key="pb_local")).instructions or ""
+    assert "PLAN LIMITS" in instructions
+    assert "NOTHING CONNECTED YET" in instructions
+    assert "pinterest_not_connected" in instructions

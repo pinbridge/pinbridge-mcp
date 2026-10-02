@@ -11,7 +11,6 @@ from starlette.routing import Mount, Route
 
 from .auth import APIKeyPassthroughMiddleware, PinBridgeAPIKeyVerifier
 from .config import Settings, get_settings
-from .quota import QuotaClient
 from .server import create_mcp_server
 
 
@@ -65,14 +64,10 @@ def create_app(settings: Settings | None = None) -> Starlette:
             Mount("/", app=mcp_app),
         ],
     )
-    quota_client = (
-        QuotaClient(base_url=settings.pinbridge_base_url) if settings.enable_quota else None
-    )
     app.add_middleware(
         APIKeyPassthroughMiddleware,
         settings=settings,
         verifier=PinBridgeAPIKeyVerifier(settings),
-        quota_client=quota_client,
     )
     return app
 

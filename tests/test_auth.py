@@ -190,3 +190,42 @@ def test_quota_client_fails_open_on_api_error() -> None:
         assert reason is None
 
     asyncio.run(run())
+
+
+def test_quota_client_relays_the_api_upgrade_message() -> None:
+    """Once used up, the block message is the API's upgrade prompt with its link."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from pinbridge_mcp.quota import QuotaClient
+
+    client = QuotaClient(base_url="https://api.pinbridge.io")
+    url = "https://app.pinbridge.io/pricing?upgrade=assistant_requests_weekly&highlight=starter"
+
+    async def run() -> None:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "quota_exhausted": True,
+            "requests_used": 100,
+            "requests_limit": 100,
+            "resets_at": "2026-10-05T00:00:00Z",
+            "upgrade": {
+                "message": "This workspace has used all 100 assistant requests this week.",
+                "remediation": f"Upgrade to Starter for 500 assistant requests a week: {url}.",
+                "upgrade_url": url,
+            },
+        }
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        with patch("pinbridge_mcp.quota.httpx.AsyncClient", return_value=mock_client):
+            ok, reason = await client.check_quota("pb_test_key")
+
+        assert ok is False
+        assert reason is not None
+        assert reason.startswith("This workspace has used all 100 assistant requests")
+        assert url in reason
+
+    asyncio.run(run())

@@ -17,6 +17,8 @@ class Settings(BaseSettings):
 
     public_base_url: str = "http://127.0.0.1:57289"
     pinbridge_base_url: str = "https://api.pinbridge.io"
+    # The PinBridge web app, for links people open (connect Pinterest, pricing).
+    app_base_url: str = "https://app.pinbridge.io"
     pinbridge_api_key: str | None = None
     verify_incoming_api_keys: bool = True
     auth_cache_ttl_seconds: int = 60
@@ -27,12 +29,16 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     min_plan: str = "free"
 
-    # Quota — enforced via API (db-backed), not in-memory
+    # Weekly assistant-request quota, counted per tool call through the API (db-backed)
     enable_quota: bool = True
 
     @property
     def normalized_public_base_url(self) -> str:
         return self.public_base_url.rstrip("/")
+
+    @property
+    def normalized_app_base_url(self) -> str:
+        return self.app_base_url.rstrip("/")
 
 
 @lru_cache(maxsize=1)
