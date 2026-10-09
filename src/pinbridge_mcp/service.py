@@ -244,10 +244,29 @@ class PinBridgeService:
 
     # ------------------------------------------------------------------ accounts / boards
 
-    async def list_pinterest_accounts(self) -> list[dict[str, Any]]:
+    def connect_pinterest_url(self) -> str:
+        """The dashboard's Get started page, which opens on the Connect Pinterest step."""
+        return f"{self.settings.normalized_app_base_url}/app?section=get-started&from=assistant"
+
+    async def list_pinterest_accounts(self) -> dict[str, Any]:
         async with self.client() as client:
             accounts = await client.pinterest.list_accounts()
-        return [_dump(account) for account in accounts]
+        items = [_dump(account) for account in accounts]
+        connect_url = self.connect_pinterest_url()
+        return {
+            "items": items,
+            "connect_url": connect_url,
+            "next_step": (
+                None
+                if items
+                else (
+                    "No Pinterest account is connected to this workspace yet, so nothing "
+                    "can be published. Give the user this link to connect one in the "
+                    f"PinBridge dashboard (about a minute): {connect_url}. When they say "
+                    "it's done, call list_pinterest_accounts again."
+                )
+            ),
+        }
 
     async def list_boards(self, account_id: str) -> list[dict[str, Any]]:
         async with self.client() as client:
@@ -935,6 +954,12 @@ class PinBridgeService:
                 text += f" Retry after {retry_after}s."
             if remediation:
                 text += f" Fix: {remediation}"
+            # Upgrade and connect links are for the person: make sure the text the
+            # assistant reads carries them even if the remediation does not.
+            for key, label in (("upgrade_url", "Upgrade"), ("connect_url", "Connect")):
+                url = envelope.get(key)
+                if isinstance(url, str) and url.startswith("http") and url not in text:
+                    text += f" {label}: {url}"
             return text
         if isinstance(exc, PinbridgeError):
             return str(exc)

@@ -14,7 +14,6 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 
 from .config import Settings
-from .quota import QuotaClient
 
 _current_api_key: ContextVar[str | None] = ContextVar("pinbridge_mcp_api_key", default=None)
 
@@ -153,12 +152,10 @@ class APIKeyPassthroughMiddleware:
         *,
         settings: Settings,
         verifier: PinBridgeAPIKeyVerifier,
-        quota_client: QuotaClient | None = None,
     ) -> None:
         self.app = app
         self.settings = settings
         self.verifier = verifier
-        self.quota_client = quota_client
 
     def _challenge_header(self) -> str:
         """WWW-Authenticate value pointing clients at protected-resource metadata.
@@ -213,17 +210,10 @@ class APIKeyPassthroughMiddleware:
                 await response(scope, receive, send)
                 return
 
-        if self.settings.enable_quota and self.quota_client is not None:
-            within_quota, quota_reason = await self.quota_client.check_quota(api_key)
-            if not within_quota:
-                response = JSONResponse({"error": quota_reason}, status_code=429)
-                await response(scope, receive, send)
-                return
-
+        # The weekly quota is checked and counted per tool call (see server.py),
+        # so the handshake and tool listing always go through.
         token = bind_current_api_key(api_key)
         try:
             await self.app(scope, receive, send)
         finally:
             reset_current_api_key(token)
-            if self.settings.enable_quota and self.quota_client is not None:
-                self.quota_client.track_background(api_key)

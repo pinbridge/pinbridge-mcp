@@ -12,7 +12,9 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
+from .auth import get_current_api_key
 from .config import Settings, get_settings
+from .quota import QuotaClient
 from .service import PinBridgeService
 
 T = TypeVar("T")
@@ -364,6 +366,14 @@ ACCOUNTS
   the account. When a call fails with token_expired, token_revoked or
   scope_missing, tell the user to reconnect the account in the dashboard.
 
+NOTHING CONNECTED YET
+  New users often have no Pinterest account connected. When
+  list_pinterest_accounts returns no items, or a call fails with
+  pinterest_not_connected, nothing can be published yet: give the user the
+  connect_url from the result as a link they can open, explain it takes about a
+  minute, and wait for them to say they are done. Then call
+  list_pinterest_accounts again. Never invent an account_id.
+
 ERRORS
   Every failure carries a stable code and a remediation sentence. Two "scope"
   codes mean different things: insufficient_scope / account_not_permitted are
@@ -385,15 +395,23 @@ WRITE TOOLS
   create_board, update_board, delete_board, create_webhook, update_webhook,
   delete_webhook are only registered when the server has write tools enabled.
 
-PLAN GATE
-  The server may require a minimum plan. If your request is rejected with a
-  plan error, upgrade your PinBridge workspace at https://pinbridge.io.
+PLAN LIMITS
+  Each PinBridge plan has limits: pins per month, Pinterest accounts, API keys,
+  assistant requests per week (each tool call is one request), uploads, batch
+  publishing, storage and file size. A call past a limit fails with
+  quota_exceeded, plan_limit, feature_unavailable, storage_quota_exceeded,
+  file_too_large or plan_required, or with a message that the week's assistant
+  requests are used up. The message names the plan that lifts the limit and an
+  upgrade link. Tell the user plainly what limit they reached, give them the
+  link exactly as written, and mention the free alternative in the message
+  (for example waiting for the reset date). Do not retry the same call.
 """
 
 
 PUBLISH_PIN_STEPS = """Publish one pin with PinBridge, in this order:
 1. If no account_id is known, read pinbridge://accounts (or call
-   list_pinterest_accounts) and pick one.
+   list_pinterest_accounts) and pick one. If none is connected, give the user the
+   connect_url and wait until they have connected an account.
 2. If no board_id is known, read pinbridge://accounts/{account_id}/boards (or call
    list_boards).
 3. If the board was not used recently or a previous publish to it failed, call
@@ -441,12 +459,32 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         ),
     )
 
-    async def guarded(call: Callable[[], Awaitable[T]]) -> T:
-        """Run a service call and turn any failure into the client-facing message."""
+    quota = (
+        QuotaClient(settings.pinbridge_base_url, app_base_url=settings.normalized_app_base_url)
+        if settings.enable_quota
+        else None
+    )
+
+    async def guarded(call: Callable[[], Awaitable[T]], *, counted: bool = True) -> T:
+        """Run a service call and turn any failure into the client-facing message.
+
+        ``counted`` calls (every tool) spend one of the workspace's weekly
+        assistant requests: once they are used up the call fails with the
+        upgrade message instead of running. Resource reads pass counted=False.
+        Only requests made with a caller's key are counted (HTTP mode).
+        """
+        api_key = get_current_api_key() if counted and quota is not None else None
+        if api_key is not None and quota is not None:
+            within_quota, message = await quota.check_quota(api_key)
+            if not within_quota:
+                raise ValueError(message)
         try:
             return await call()
         except Exception as exc:
             raise ValueError(service.format_error(exc)) from exc
+        finally:
+            if api_key is not None and quota is not None:
+                quota.track_background(api_key)
 
     def tool(
         base: ToolAnnotations, title: str
@@ -471,7 +509,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         mime_type="application/json",
     )
     async def accounts_resource() -> str:
-        return json.dumps(await guarded(service.list_pinterest_accounts))
+        return json.dumps(await guarded(service.list_pinterest_accounts, counted=False))
 
     @mcp.resource(
         "pinbridge://accounts/{account_id}/boards",
@@ -484,7 +522,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         mime_type="application/json",
     )
     async def boards_resource(account_id: str) -> str:
-        return json.dumps(await guarded(lambda: service.list_boards(account_id)))
+        return json.dumps(await guarded(lambda: service.list_boards(account_id), counted=False))
 
     # ------------------------------------------------------------------ prompts
 
@@ -528,7 +566,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         return await service.server_info()
 
     @tool(READ, "List Pinterest accounts")
-    async def list_pinterest_accounts() -> list[dict]:
+    async def list_pinterest_accounts() -> dict:
         """List the Pinterest accounts connected to this workspace with their health.
 
         Use first: list_boards, create_pin, create_schedule and get_rate_meter
@@ -536,12 +574,14 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         connect a new account or fix reconnect_required, the user must use the
         PinBridge dashboard; there is no tool for that.
 
-        Returns one entry per account with id (the account_id), username,
-        display_name, scopes (comma-separated), token_expires_at and health:
-        health_status (healthy, refresh_due, reconnect_required or
-        scope_missing), health_message, reconnect_required and missing_scopes.
-        An empty list means nothing is connected. Accounts outside this API key's
-        allow-list are omitted. Never fails for a valid key.
+        Returns {"items": [...], "connect_url": "...", "next_step": ...}. items has
+        one entry per account with id (the account_id), username, display_name,
+        scopes (comma-separated), token_expires_at and health: health_status
+        (healthy, refresh_due, reconnect_required or scope_missing),
+        health_message, reconnect_required and missing_scopes. connect_url opens
+        the dashboard's connect step. When items is empty nothing is connected:
+        next_step says to give the user connect_url. Accounts outside this API
+        key's allow-list are omitted. Never fails for a valid key.
         """
         return await guarded(service.list_pinterest_accounts)
 
