@@ -68,7 +68,7 @@ Write tools (registered when `PINBRIDGE_MCP_ENABLE_WRITE_TOOLS=true`):
 
 A published pin that is later deleted on Pinterest (by hand, or with its board) keeps `status: published` and gains `removed_from_pinterest_at`. `list_pins(removed=true)` finds them. `get_pin_analytics` answers from PinBridge's stored history, and editing the pin fails with `pin_removed_on_pinterest`.
 
-Every tool carries `readOnlyHint`, `destructiveHint` and `idempotentHint`, so a client can decide what needs a confirmation. Creates that mint their own idempotency key are marked non-idempotent; pass `idempotency_key` yourself to make a retry safe.
+Every tool carries `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint`, so a client can decide what needs a confirmation. `destructiveHint` is true on every write that is not purely additive: the deletes, the `update_*` tools (they overwrite existing values) and `cancel_schedule` (a canceled schedule cannot be re-armed). Only creates and retries are non-destructive. Creates that mint their own idempotency key are marked non-idempotent; pass `idempotency_key` yourself to make a retry safe.
 
 Resources: `pinbridge://accounts` and `pinbridge://accounts/{account_id}/boards`. Prompt: `publish_pin` (upload → validate → publish → measure).
 
@@ -179,4 +179,4 @@ Run the ASGI app from `pinbridge_mcp.http:create_app` (the Docker `CMD` does thi
 
 ## Safety
 
-Write tools are off by default. Production runs with them on, relying on three layers: API-key scopes and account allow-lists on the PinBridge side, `destructiveHint` on `delete_asset`, `delete_pin`, `delete_board`, `delete_schedule` and `delete_webhook` so clients confirm before calling, and `dry_run` on the publish tools so an agent can preflight for free. `delete_board` removes every pin on the board; the tool description tells agents to use `update_pin` or `delete_pin` for a single wrong pin instead.
+Write tools are off by default. Production runs with them on, relying on three layers: API-key scopes and account allow-lists on the PinBridge side, `destructiveHint` on the delete tools, the `update_*` tools and `cancel_schedule` so clients confirm before calling, and `dry_run` on the publish tools so an agent can preflight for free. `delete_board` removes every pin on the board; the tool description tells agents to use `update_pin` or `delete_pin` for a single wrong pin instead.

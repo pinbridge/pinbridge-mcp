@@ -46,12 +46,19 @@ WRITE_TOOLS = {
     "update_webhook",
     "delete_webhook",
 }
+# Deletes, edits that overwrite existing values, and the cancel that cannot be undone.
+# Only creates and retries are additive.
 DESTRUCTIVE_TOOLS = {
     "delete_asset",
     "delete_pin",
     "delete_board",
     "delete_webhook",
     "delete_schedule",
+    "update_pin",
+    "update_schedule",
+    "update_board",
+    "update_webhook",
+    "cancel_schedule",
 }
 # Writes that only change PinBridge's own records, never Pinterest or an outside URL.
 CLOSED_WORLD_WRITE_TOOLS = {"delete_asset", "cancel_schedule", "delete_schedule", "delete_webhook"}

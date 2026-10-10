@@ -292,14 +292,14 @@ WRITE = ToolAnnotations(
 WRITE_NON_IDEMPOTENT = ToolAnnotations(
     readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
 )
+# destructiveHint marks every write that is not purely additive: deletes, edits that
+# overwrite existing values, and a cancel that cannot be undone. Only creates and
+# retries stay non-destructive.
 DESTRUCTIVE = ToolAnnotations(
     readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=True
 )
-# Writes that only change PinBridge's own records (a schedule, a webhook, an uploaded
-# file) and never reach Pinterest or an outside URL.
-WRITE_LOCAL = ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
-)
+# Destructive writes that only change PinBridge's own records (a schedule, a webhook,
+# an uploaded file) and never reach Pinterest or an outside URL.
 DESTRUCTIVE_LOCAL = ToolAnnotations(
     readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
 )
@@ -1199,7 +1199,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @tool(WRITE, "Update unpublished pin")
+    @tool(DESTRUCTIVE, "Update unpublished pin")
     async def update_pin(
         pin_id: PinId,
         title: OptionalTitle = None,
@@ -1338,7 +1338,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @tool(WRITE, "Update scheduled pin")
+    @tool(DESTRUCTIVE, "Update scheduled pin")
     async def update_schedule(
         schedule_id: ScheduleId,
         run_at: Annotated[
@@ -1390,7 +1390,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @tool(WRITE_LOCAL, "Cancel scheduled pin")
+    @tool(DESTRUCTIVE_LOCAL, "Cancel scheduled pin")
     async def cancel_schedule(schedule_id: ScheduleId) -> dict:
         """Cancel a pending scheduled pin so it never publishes.
 
@@ -1473,7 +1473,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @tool(WRITE, "Update board")
+    @tool(DESTRUCTIVE, "Update board")
     async def update_board(
         board_id: BoardId,
         account_id: AccountId,
@@ -1566,7 +1566,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             )
         )
 
-    @tool(WRITE, "Update webhook")
+    @tool(DESTRUCTIVE, "Update webhook")
     async def update_webhook(
         webhook_id: WebhookId,
         url: Annotated[str | None, Field(description="New endpoint URL.")] = None,
