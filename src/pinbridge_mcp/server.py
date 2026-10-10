@@ -304,107 +304,46 @@ DESTRUCTIVE_LOCAL = ToolAnnotations(
     readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
 )
 
-INSTRUCTIONS = """PinBridge MCP server — manage Pinterest publishing through the PinBridge API.
+# Sent to every client at initialize. Keep it to guidance that spans tools (call order,
+# shared limits) with the call order inside the first 512 characters, which is what
+# OpenAI's plugin review asks for. Per-tool detail belongs in the tool descriptions. No
+# authentication details and no plan or pricing talk here: directory reviewers reject both.
+INSTRUCTIONS = """\
+PinBridge publishes and schedules pins on the user's own connected Pinterest accounts.
 
-AUTHENTICATION
-  HTTP mode:  Authorization: Bearer <pinbridge_api_key>  (or the built-in OAuth flow)
-  stdio mode: PINBRIDGE_MCP_PINBRIDGE_API_KEY env var
+Order of calls:
+1. list_pinterest_accounts returns the account_id the other tools need.
+2. list_boards(account_id) returns the board_id.
+3. If the image is not at a public URL, call upload_asset and pass its asset_id.
+4. create_pin publishes now and create_schedule publishes later. Pass dry_run=true
+   first to validate without publishing.
+The publish_pin prompt has the full sequence.
 
-SCOPE
-  All operations are scoped to the workspace of the API key. Keys can carry
-  read / write / destructive scopes and a Pinterest-account allow-list; a call
-  outside the key's grants fails with error code insufficient_scope or
-  account_not_permitted.
+No account connected: when list_pinterest_accounts returns no items, or a call
+fails with pinterest_not_connected, nothing can be published yet. Give the user
+the connect_url from the result, then call list_pinterest_accounts again once
+they have connected an account. Connecting and disconnecting accounts is
+dashboard-only; there is no tool for it.
 
-WORKFLOW (use the publish_pin prompt for the full sequence)
-  1. list_pinterest_accounts()  → account_id   (also: resource pinbridge://accounts)
-  2. list_boards(account_id)    → board_id     (also: pinbridge://accounts/{id}/boards)
-  3. Need an image the internet cannot fetch? upload_asset(...) → asset_id
-  4. create_pin(..., dry_run=true) to preflight for free (nothing is published)
-  5. create_pin(...) / create_schedule(...) / create_pins_batch(...)
-  6. get_pin_analytics(pin_id) after publishing. Fix a mistake with update_pin BEFORE the
-     pin publishes; a published pin cannot be edited, only deleted (delete_pin) and
-     published again
-  7. Wrong time or board on a pending schedule? update_schedule(...) edits it in place;
-     never cancel + recreate for a small fix
+Changing things:
+- update_pin works only before a pin publishes. A published pin cannot be
+  edited: delete_pin it, then create_pin again.
+- update_schedule edits a pending schedule in place; do not cancel and recreate it.
+- delete_board removes every pin on the board. Use delete_pin for one pin.
 
-REPORTING
-  get_dashboard_summary(start, end, tz) answers "how did publishing go" for any
-  period up to 366 days: counts per status, success rate, the previous period
-  for comparison, and what is queued or scheduled. Outcomes count when they
-  happened: a pin submitted last month and published today is published today.
+Limits and errors:
+- Every failure carries a stable code and a one-sentence fix. Follow the fix
+  instead of repeating the call; a dry run or check_board_access shows what is wrong.
+- rate_limited carries retry_after_seconds. Use create_schedule to spread pins out.
+- A workspace has publishing and request limits. A call past one fails with a
+  message naming the limit and when it resets. Tell the user and do not retry.
+- token_expired, token_revoked and scope_missing mean the Pinterest account must
+  be reconnected in the PinBridge dashboard.
 
-PINS DELETED ON PINTEREST
-  A published pin later deleted on Pinterest keeps status published and gains
-  removed_from_pinterest_at. Find them with list_pins(removed=true). Their
-  analytics come from PinBridge's stored history; editing them fails with
-  pin_removed_on_pinterest. Clean up with delete_pin, or publish again with
-  create_pin.
-
-LISTS AND PAGING
-  list_pins and list_schedules return one page as an object:
-    {"items": [...], "total": 57, "limit": 20, "offset": 0, "has_more": true}
-  - items: the rows on this page, in the requested sort order.
-  - total: every match across all pages. For "how many?" questions call once
-    with limit=1 and read total; never page through rows just to count them.
-  - Next page: repeat the call with the same filters, q and sort and
-    offset = offset + limit, while has_more is true.
-  - q is a case-insensitive search over title, description and link URL;
-    sort picks the order (pins: newest first; schedules: latest run first,
-    run_at_asc for the next run first).
-  - list_pins items are a summary by default; pass detail="full" for every
-    field, or call get_pin for one pin. Read with limit <= 50; counting needs
-    only limit=1.
-  - total is null only against a PinBridge API older than 1.34; has_more then
-    just means the page came back full.
-  list_activity_logs pages by cursor instead: pass next_cursor back as cursor.
-
-ACCOUNTS
-  Connecting or disconnecting a Pinterest account is deliberately dashboard-only
-  (https://app.pinbridge.io): connecting needs a person to approve Pinterest's
-  OAuth grant in a browser, and disconnecting drops every pending schedule on
-  the account. When a call fails with token_expired, token_revoked or
-  scope_missing, tell the user to reconnect the account in the dashboard.
-
-NOTHING CONNECTED YET
-  New users often have no Pinterest account connected. When
-  list_pinterest_accounts returns no items, or a call fails with
-  pinterest_not_connected, nothing can be published yet: give the user the
-  connect_url from the result as a link they can open, explain it takes about a
-  minute, and wait for them to say they are done. Then call
-  list_pinterest_accounts again. Never invent an account_id.
-
-ERRORS
-  Every failure carries a stable code and a remediation sentence. Two "scope"
-  codes mean different things: insufficient_scope / account_not_permitted are
-  about THIS API key's grants (ask a workspace admin for a wider key);
-  scope_missing / token_expired / token_revoked are about the connected
-  Pinterest account (reconnect it in the PinBridge dashboard). Board codes:
-  board_not_found, board_not_owned, board_deleted, board_access_denied.
-  pin_already_published: published pins cannot be edited (Pinterest's API does
-  not allow it); offer delete_pin plus a new create_pin. Two codes are Pinterest
-  refusing the action itself, so reconnecting does NOT help:
-  pinterest_feature_unavailable and pinterest_not_permitted. invalid_image means
-  the file is broken: upload a valid one. Others: quota_exceeded, rate_limited
-  (has retry_after_seconds), validation_error.
-  Prefer a dry run (or check_board_access after a board failure) over retrying blind.
-
-WRITE TOOLS
-  upload_asset, delete_asset, create_pin, create_pins_batch, update_pin, delete_pin, retry_pin,
-  create_schedule, update_schedule, cancel_schedule, retry_schedule, delete_schedule,
-  create_board, update_board, delete_board, create_webhook, update_webhook,
-  delete_webhook are only registered when the server has write tools enabled.
-
-PLAN LIMITS
-  Each PinBridge plan has limits: pins per month, Pinterest accounts, API keys,
-  assistant requests per week (each tool call is one request), uploads, batch
-  publishing, storage and file size. A call past a limit fails with
-  quota_exceeded, plan_limit, feature_unavailable, storage_quota_exceeded,
-  file_too_large or plan_required, or with a message that the week's assistant
-  requests are used up. The message names the plan that lifts the limit and an
-  upgrade link. Tell the user plainly what limit they reached, give them the
-  link exactly as written, and mention the free alternative in the message
-  (for example waiting for the reset date). Do not retry the same call.
+Reading:
+- list_pins and list_schedules return one page with total and has_more. For a
+  count, call with limit=1 and read total.
+- get_dashboard_summary answers how publishing went over a period.
 """
 
 

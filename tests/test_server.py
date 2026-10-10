@@ -240,7 +240,7 @@ def test_resources_and_prompt_are_registered() -> None:
 def test_instructions_describe_the_workflow_and_error_contract() -> None:
     mcp = create_mcp_server(Settings(pinbridge_api_key="pb_local"))
     assert "publish_pin" in (mcp.instructions or "")
-    assert "insufficient_scope" in (mcp.instructions or "")
+    assert "rate_limited" in (mcp.instructions or "")
     assert "check_board_access" in (mcp.instructions or "")
     assert "get_dashboard_summary" in (mcp.instructions or "")
 
@@ -275,8 +275,7 @@ def test_list_pins_returns_the_page_as_structured_content(monkeypatch) -> None:
 
 def test_instructions_explain_paging_and_counting() -> None:
     instructions = create_mcp_server(Settings(pinbridge_api_key="pb_local")).instructions or ""
-    assert "LISTS AND PAGING" in instructions
-    assert "offset = offset + limit" in instructions
+    assert "has_more" in instructions
     assert "limit=1" in instructions
 
 
@@ -355,6 +354,18 @@ def test_resource_reads_do_not_spend_the_quota(monkeypatch) -> None:
 
 def test_instructions_cover_plan_limits_and_the_connect_step() -> None:
     instructions = create_mcp_server(Settings(pinbridge_api_key="pb_local")).instructions or ""
-    assert "PLAN LIMITS" in instructions
-    assert "NOTHING CONNECTED YET" in instructions
+    assert "when it resets" in instructions
+    assert "connect_url" in instructions
     assert "pinterest_not_connected" in instructions
+
+
+def test_instructions_stay_within_directory_review_rules() -> None:
+    """OpenAI holds server instructions that are long, restate tools, or sell plans."""
+    instructions = create_mcp_server(Settings(pinbridge_api_key="pb_local")).instructions or ""
+    assert len(instructions) <= 2000
+    # The call order has to sit in the first 512 characters.
+    for name in ("list_pinterest_accounts", "list_boards", "upload_asset", "create_schedule"):
+        assert 0 <= instructions.find(name) < 512, name
+    lowered = instructions.lower()
+    for banned in ("api key", "bearer", "env var", "upgrade", "pricing", "subscription"):
+        assert banned not in lowered, banned
