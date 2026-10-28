@@ -11,6 +11,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
+from pydantic.json_schema import SkipJsonSchema
 
 from .auth import get_current_api_key
 from .config import Settings, get_settings
@@ -47,6 +48,27 @@ class PinInput(BaseModel):
             "Unique key per pin so a resend never duplicates it. Generated when omitted, "
             "which makes the batch NOT safe to resend after a timeout."
         ),
+    )
+
+
+def _drop_default(schema: dict[str, Any]) -> None:
+    schema.pop("default", None)
+
+
+# ChatGPT fills inputs listed in _meta["openai/fileParams"] with this object for an image
+# attached to or generated in the conversation. OpenAI's tool scan wants all four
+# properties declared, download_url and file_id required, and nothing else required. The
+# docstring is the schema description clients read.
+class ChatFile(BaseModel):
+    """A file handed over by the client as a download link."""
+
+    download_url: str = Field(description="Temporary URL the server downloads the file from.")
+    file_id: str = Field(description="The client's id for the file.")
+    mime_type: str | SkipJsonSchema[None] = Field(
+        default=None, description='MIME type, e.g. "image/png".', json_schema_extra=_drop_default
+    )
+    file_name: str | SkipJsonSchema[None] = Field(
+        default=None, description="Original file name.", json_schema_extra=_drop_default
     )
 
 
@@ -357,8 +379,9 @@ PUBLISH_PIN_STEPS = """Publish one pin with PinBridge, in this order:
    check_board_access(account_id, board_id) and follow its remediation instead of
    retrying; otherwise the dry run in step 6 covers this check.
 4. Media: if the image is a public URL, pass it as image_url. If you generated the
-   image or it is not publicly fetchable, call upload_asset (content_base64 or
-   source_url) and use the returned id as asset_id.
+   image or it is not publicly fetchable, call upload_asset (file for an image
+   in the conversation, else content_base64 or source_url) and use the returned
+   id as asset_id.
 5. Draft title (<=100 chars), description (<=800 chars, use list_related_terms for
    keywords), link_url and alt_text.
 6. Run create_pin with dry_run=true. Show the resolved payload and every check to
@@ -426,14 +449,16 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
                 quota.track_background(api_key)
 
     def tool(
-        base: ToolAnnotations, title: str
+        base: ToolAnnotations, title: str, *, meta: dict[str, Any] | None = None
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Register a tool with its human-readable title.
 
         The title goes on the tool and in annotations.title, which the Claude
-        connectors directory reads for its listing.
+        connectors directory reads for its listing. ``meta`` becomes the tool's _meta.
         """
-        return mcp.tool(title=title, annotations=base.model_copy(update={"title": title}))
+        return mcp.tool(
+            title=title, annotations=base.model_copy(update={"title": title}), meta=meta
+        )
 
     # ------------------------------------------------------------------ resources
 
@@ -972,9 +997,20 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
     # ------------------------------------------------------------------ write tools
 
-    @tool(WRITE_NON_IDEMPOTENT, "Upload image or video")
+    # ChatGPT passes a chat attachment or generated image only to inputs listed here.
+    @tool(WRITE_NON_IDEMPOTENT, "Upload image or video", meta={"openai/fileParams": ["file"]})
     async def upload_asset(
         filename: Annotated[str, Field(description='File name with extension, e.g. "hero.png".')],
+        file: Annotated[
+            ChatFile | SkipJsonSchema[None],
+            Field(
+                description=(
+                    "An image or video attached to or generated in the conversation, "
+                    "handed over by the client as a download link."
+                ),
+                json_schema_extra=_drop_default,
+            ),
+        ] = None,
         content_base64: Annotated[
             str | None, Field(description="Base64-encoded file bytes (data: prefix allowed).")
         ] = None,
@@ -998,8 +1034,9 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
         Use when the media was generated in this session or Pinterest cannot
         fetch it from a public URL; otherwise pass image_url to create_pin
-        directly. Provide exactly one of content_base64 or source_url. Videos
-        must be uploaded assets.
+        directly. Provide exactly one of file, content_base64 or source_url.
+        For a file attached to or generated in the conversation use file, never
+        a file path in content_base64. Videos must be uploaded assets.
 
         Returns id (use as asset_id), public_url, asset_type, content_type,
         size_bytes, created_at. Files are capped at 200 MB (plans cap lower).
@@ -1013,7 +1050,8 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
                 filename=filename,
                 content_base64=content_base64,
                 source_url=source_url,
-                content_type=content_type,
+                file_url=file.download_url if file else None,
+                content_type=content_type or (file.mime_type if file else None),
                 asset_type=asset_type,
             )
         )

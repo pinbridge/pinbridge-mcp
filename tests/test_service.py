@@ -616,10 +616,33 @@ def test_upload_asset_from_base64_and_validation() -> None:
 
     asyncio.run(run())
 
-    with pytest.raises(ValueError, match="exactly one"):
+    with pytest.raises(ValueError, match="exactly one of file, content_base64 or source_url"):
         asyncio.run(service.upload_asset(filename="x.png"))
+    with pytest.raises(ValueError, match="exactly one"):
+        asyncio.run(
+            service.upload_asset(
+                filename="x.png", content_base64="aGk=", file_url="https://files.example.com/f"
+            )
+        )
     with pytest.raises(ValueError, match="valid base64"):
         asyncio.run(service.upload_asset(filename="x.png", content_base64="not base64!!"))
+
+
+def test_upload_asset_explains_a_file_path_sent_as_base64() -> None:
+    """ChatGPT once sent its sandbox path as content_base64; point it at the file param."""
+    service = _service()
+    for path in (
+        "/mnt/data/A simple homeschool folder system (1)(2).png",
+        "sandbox:/mnt/data/pin.png",
+        "file:///tmp/pin.png",
+    ):
+        with pytest.raises(ValueError, match="file path.*file parameter"):
+            asyncio.run(service.upload_asset(filename="x.png", content_base64=path))
+    # A JPEG's base64 starts with "/9j/", so a leading slash alone is not a path.
+    jpeg = base64.b64encode(b"\xff\xd8\xff\xe0 jpeg bytes").decode()
+    assert jpeg.startswith("/9j/")
+    asyncio.run(service.upload_asset(filename="x.jpg", content_base64=jpeg))
+    assert _FakeClient.instances[-1].assets.uploads[-1][1] == b"\xff\xd8\xff\xe0 jpeg bytes"
     with pytest.raises(ValueError, match="asset_type"):
         asyncio.run(service.upload_asset(filename="x.gif", content_base64="aGk=", asset_type="gif"))
 
@@ -712,6 +735,76 @@ def test_upload_asset_refuses_private_hosts_schemes_and_redirects(monkeypatch) -
     )
     with pytest.raises(ValueError, match="redirects"):
         asyncio.run(service.upload_asset(filename="x.png", source_url="https://cdn.example.com/a"))
+
+
+def _install_fetcher_sequence(monkeypatch, responses, seen: list[str]):
+    queue = list(responses)
+
+    class _Fetcher:
+        def __init__(self, *args, **kwargs) -> None:
+            assert kwargs.get("follow_redirects") is False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        def stream(self, method: str, url: str):
+            seen.append(url)
+            return _StreamContext(queue.pop(0))
+
+    monkeypatch.setattr("pinbridge_mcp.service.httpx.AsyncClient", _Fetcher)
+
+
+def test_upload_asset_from_a_client_file_link_follows_checked_redirects(monkeypatch) -> None:
+    service = _service()
+    checked: list[str] = []
+
+    def fake_is_public(host: str) -> bool:
+        checked.append(host)
+        return host != "metadata.internal"
+
+    monkeypatch.setattr("pinbridge_mcp.service._host_is_public", fake_is_public)
+    seen: list[str] = []
+    _install_fetcher_sequence(
+        monkeypatch,
+        [
+            _StreamedResponse(status_code=302, headers={"location": "https://store.example/f1"}),
+            _StreamedResponse(headers={"content-type": "image/png"}, chunks=(b"png-bytes",)),
+        ],
+        seen,
+    )
+    asset = asyncio.run(
+        service.upload_asset(filename="pin.png", file_url="https://files.example.com/f?sig=1")
+    )
+    assert asset["id"] == "asset_1"
+    assert seen == ["https://files.example.com/f?sig=1", "https://store.example/f1"]
+    assert checked == ["files.example.com", "store.example"]
+    kind, data, filename, content_type = _FakeClient.instances[-1].assets.uploads[0]
+    assert (kind, data, filename, content_type) == ("image", b"png-bytes", "pin.png", "image/png")
+
+    # A hop to a private host is refused, and the signed link is never echoed back.
+    _install_fetcher_sequence(
+        monkeypatch,
+        [_StreamedResponse(status_code=302, headers={"location": "http://metadata.internal/"})],
+        seen,
+    )
+    with pytest.raises(ValueError, match="file.download_url must point at a public host") as err:
+        asyncio.run(service.upload_asset(filename="x.png", file_url="https://files.example.com/g"))
+    assert "metadata.internal" not in str(err.value)
+
+    _install_fetcher_sequence(
+        monkeypatch,
+        [_StreamedResponse(status_code=302, headers={"location": "/again"}) for _ in range(4)],
+        seen,
+    )
+    with pytest.raises(ValueError, match="redirects more than 3 times"):
+        asyncio.run(service.upload_asset(filename="x.png", file_url="https://files.example.com/h"))
+
+    _install_fetcher_sequence(monkeypatch, [_StreamedResponse(status_code=403)], seen)
+    with pytest.raises(ValueError, match="Could not fetch file.download_url \\(HTTP 403\\)"):
+        asyncio.run(service.upload_asset(filename="x.png", file_url="https://files.example.com/i"))
 
 
 def test_upload_asset_enforces_size_ceiling_while_streaming(monkeypatch) -> None:

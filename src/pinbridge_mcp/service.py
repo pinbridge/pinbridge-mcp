@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from uuid import uuid4
 
 import httpx
@@ -31,6 +31,11 @@ from .config import Settings
 _MAX_ASSET_BYTES = 200 * 1024 * 1024
 _ASSET_FETCH_TIMEOUT_SECONDS = 60.0
 _FETCH_CHUNK_BYTES = 1024 * 1024
+# A client file link (ChatGPT's download_url) may hop to its storage host; each hop is
+# checked like the first.
+_FILE_URL_MAX_REDIRECTS = 3
+# What agents put in content_base64 when they hold a file instead of its bytes.
+_PATH_PREFIXES = ("/", "./", "~/", "file:", "sandbox:")
 
 
 def _parse_iso_datetime(value: str, field: str = "timestamp") -> datetime:
@@ -54,6 +59,12 @@ def _decode_base64(value: str) -> bytes:
     try:
         return base64.b64decode(compact, validate=True)
     except (binascii.Error, ValueError) as exc:
+        if value.strip().startswith(_PATH_PREFIXES):
+            raise ValueError(
+                "content_base64 holds a file path, not the file's bytes; pass the file in "
+                "the file parameter instead (ChatGPT fills it from an attached or "
+                "generated image), or use source_url for a public link"
+            ) from exc
         raise ValueError("content_base64 is not valid base64") from exc
 
 
@@ -72,49 +83,65 @@ def _host_is_public(hostname: str) -> bool:
     return True
 
 
-async def _fetch_public_url(url: str, content_type: str | None) -> tuple[bytes, str | None]:
-    """Download a public URL with SSRF and size guards.
-
-    Only http(s), only globally routable hosts, no redirects (the caller passes
-    the final URL), and the body is streamed against the size ceiling instead of
-    being buffered first.
-    """
+async def _check_public_url(url: str, field: str) -> None:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ValueError("source_url must be an http(s) URL")
+        raise ValueError(f"{field} must be an http(s) URL")
     if not await asyncio.to_thread(_host_is_public, parsed.hostname):
         raise ValueError(
-            "source_url must point at a public host; private, loopback and link-local "
+            f"{field} must point at a public host; private, loopback and link-local "
             "addresses are refused"
         )
+
+
+async def _fetch_public_url(
+    url: str, content_type: str | None, *, field: str = "source_url", max_redirects: int = 0
+) -> tuple[bytes, str | None]:
+    """Download a public URL with SSRF and size guards.
+
+    Only http(s) and only globally routable hosts, checked again on every redirect
+    hop. ``source_url`` allows no redirects (the caller passes the final URL), and
+    redirect targets are never echoed for other fields because client file links
+    carry signatures. The body is streamed against the size ceiling instead of
+    being buffered first.
+    """
     async with httpx.AsyncClient(
         timeout=_ASSET_FETCH_TIMEOUT_SECONDS, follow_redirects=False
     ) as fetcher:
-        async with fetcher.stream("GET", url) as fetched:
-            if 300 <= fetched.status_code < 400:
-                raise ValueError(
-                    "source_url redirects; pass the final URL it redirects to "
-                    f"({fetched.headers.get('location', 'unknown')})"
-                )
-            if fetched.status_code >= 400:
-                raise ValueError(
-                    f"Could not fetch source_url (HTTP {fetched.status_code}); the URL must "
-                    "be publicly readable."
-                )
-            declared = fetched.headers.get("content-length")
-            if declared and declared.isdigit() and int(declared) > _MAX_ASSET_BYTES:
-                raise ValueError("The asset exceeds the 200 MB upload ceiling")
-            chunks: list[bytes] = []
-            total = 0
-            async for chunk in fetched.aiter_bytes(_FETCH_CHUNK_BYTES):
-                total += len(chunk)
-                if total > _MAX_ASSET_BYTES:
+        for _hop in range(max_redirects + 1):
+            await _check_public_url(url, field)
+            async with fetcher.stream("GET", url) as fetched:
+                if 300 <= fetched.status_code < 400:
+                    location = fetched.headers.get("location")
+                    if max_redirects == 0:
+                        raise ValueError(
+                            f"{field} redirects; pass the final URL it redirects to "
+                            f"({location or 'unknown'})"
+                        )
+                    if not location:
+                        raise ValueError(f"{field} redirects without a location")
+                    url = urljoin(url, location)
+                    continue
+                if fetched.status_code >= 400:
+                    raise ValueError(
+                        f"Could not fetch {field} (HTTP {fetched.status_code}); the URL must "
+                        "be publicly readable."
+                    )
+                declared = fetched.headers.get("content-length")
+                if declared and declared.isdigit() and int(declared) > _MAX_ASSET_BYTES:
                     raise ValueError("The asset exceeds the 200 MB upload ceiling")
-                chunks.append(chunk)
-            if not content_type:
-                header = fetched.headers.get("content-type", "")
-                content_type = header.split(";", 1)[0].strip() or None
-    return b"".join(chunks), content_type
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in fetched.aiter_bytes(_FETCH_CHUNK_BYTES):
+                    total += len(chunk)
+                    if total > _MAX_ASSET_BYTES:
+                        raise ValueError("The asset exceeds the 200 MB upload ceiling")
+                    chunks.append(chunk)
+                if not content_type:
+                    header = fetched.headers.get("content-type", "")
+                    content_type = header.split(";", 1)[0].strip() or None
+                return b"".join(chunks), content_type
+    raise ValueError(f"{field} redirects more than {max_redirects} times")
 
 
 def _normalize_terms(terms: str | list[str]) -> list[str]:
@@ -315,20 +342,32 @@ class PinBridgeService:
         filename: str,
         content_base64: str | None = None,
         source_url: str | None = None,
+        file_url: str | None = None,
         content_type: str | None = None,
         asset_type: str = "image",
     ) -> dict[str, Any]:
-        """Upload an image or video and return the asset (``id`` feeds ``asset_id``)."""
+        """Upload an image or video and return the asset (``id`` feeds ``asset_id``).
+
+        ``file_url`` is the download link of a file the client handed over (ChatGPT's
+        file params); it is fetched like ``source_url`` but may redirect.
+        """
         if asset_type not in {"image", "video"}:
             raise ValueError("asset_type must be 'image' or 'video'")
-        if bool(content_base64) == bool(source_url):
-            raise ValueError("Provide exactly one of content_base64 or source_url")
+        if sum(bool(source) for source in (content_base64, source_url, file_url)) != 1:
+            raise ValueError("Provide exactly one of file, content_base64 or source_url")
 
-        if content_base64 is not None:
+        if content_base64:
             data = _decode_base64(content_base64)
-        else:
-            assert source_url is not None
+        elif source_url:
             data, content_type = await _fetch_public_url(source_url, content_type)
+        else:
+            assert file_url is not None
+            data, content_type = await _fetch_public_url(
+                file_url,
+                content_type,
+                field="file.download_url",
+                max_redirects=_FILE_URL_MAX_REDIRECTS,
+            )
         if not data:
             raise ValueError("The asset is empty")
         if len(data) > _MAX_ASSET_BYTES:
