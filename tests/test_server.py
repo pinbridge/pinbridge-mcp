@@ -310,6 +310,49 @@ def test_upload_asset_downloads_a_chatgpt_file(monkeypatch) -> None:
     assert calls[-1]["content_type"] == "image/jpeg"
 
 
+def test_schedule_tools_take_alt_text_like_create_pin(monkeypatch) -> None:
+    tools = _tools(enable_write_tools=True)
+    for name in ("create_pin", "create_schedule", "update_schedule"):
+        assert "alt_text" in tools[name].inputSchema["properties"], name
+
+    calls: list[dict[str, Any]] = []
+
+    async def fake_create_schedule(self, **kwargs):
+        calls.append(kwargs)
+        return {"id": "sched_1"}
+
+    async def fake_update_schedule(self, schedule_id, **kwargs):
+        calls.append(kwargs)
+        return {"id": schedule_id}
+
+    monkeypatch.setattr(
+        "pinbridge_mcp.service.PinBridgeService.create_schedule", fake_create_schedule
+    )
+    monkeypatch.setattr(
+        "pinbridge_mcp.service.PinBridgeService.update_schedule", fake_update_schedule
+    )
+    mcp = create_mcp_server(Settings(pinbridge_api_key="pb_local", enable_write_tools=True))
+    asyncio.run(
+        mcp.call_tool(
+            "create_schedule",
+            {
+                "account_id": "acct_1",
+                "board_id": "b1",
+                "title": "Soup",
+                "run_at": "2030-01-01T10:00:00Z",
+                "asset_id": "asset_1",
+                "alt_text": "A bowl of tomato soup",
+            },
+        )
+    )
+    assert calls[-1]["alt_text"] == "A bowl of tomato soup"
+
+    asyncio.run(
+        mcp.call_tool("update_schedule", {"schedule_id": "sched_1", "alt_text": "A red bicycle"})
+    )
+    assert calls[-1]["alt_text"] == "A red bicycle"
+
+
 def test_list_pins_returns_the_page_as_structured_content(monkeypatch) -> None:
     page = {"items": [{"id": "pin-1"}], "total": 41, "limit": 20, "offset": 20, "has_more": True}
 

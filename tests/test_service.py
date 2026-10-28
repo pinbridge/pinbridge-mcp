@@ -538,6 +538,30 @@ def test_create_schedule_dry_run_and_batch() -> None:
     asyncio.run(run())
 
 
+def test_create_and_update_schedule_send_alt_text() -> None:
+    service = _service()
+
+    async def run() -> None:
+        fields = {
+            "account_id": "acct_1",
+            "board_id": "b1",
+            "title": "T",
+            "run_at": "2030-01-01T10:00:00Z",
+            "image_url": "https://x/y.png",
+            "alt_text": "A bowl of soup",
+        }
+        await service.create_schedule(**fields, dry_run=True)
+        assert _last_request()["json"]["alt_text"] == "A bowl of soup"
+
+        created = await service.create_schedule(**fields)
+        assert created["alt_text"] == "A bowl of soup"
+
+        await service.update_schedule("sched_1", alt_text="A red bicycle")
+        assert _last_request()["json"] == {"alt_text": "A red bicycle"}
+
+    asyncio.run(run())
+
+
 def test_batch_rejects_incomplete_entries() -> None:
     service = _service()
     with pytest.raises(ValueError, match="pins\\[0\\] is missing required field 'board_id'"):
