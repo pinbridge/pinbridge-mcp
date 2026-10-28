@@ -259,6 +259,57 @@ def test_list_tools_publish_a_described_page_schema() -> None:
         assert "limit=1" in properties["total"]["description"], name
 
 
+def test_upload_asset_declares_a_chatgpt_file_param() -> None:
+    """ChatGPT hands chat attachments and generated images only to declared file params."""
+    tools = _tools(enable_write_tools=True)
+    upload = tools["upload_asset"]
+    assert upload.meta == {"openai/fileParams": ["file"]}
+    schema = upload.inputSchema
+    file_schema = schema["properties"]["file"]
+    assert set(file_schema) <= {"$ref", "description", "title"}
+    assert "file" not in schema["required"]
+    file_object = schema["$defs"][file_schema["$ref"].rsplit("/", 1)[1]]
+    # OpenAI's tool scan rejects a file schema that misses one of the four properties,
+    # does not require download_url and file_id, or requires anything else.
+    assert set(file_object["properties"]) == {"download_url", "file_id", "mime_type", "file_name"}
+    assert set(file_object["required"]) == {"download_url", "file_id"}
+    assert all(spec == {**spec, "type": "string"} for spec in file_object["properties"].values())
+    for name, tool in tools.items():
+        if name != "upload_asset":
+            assert "openai/fileParams" not in (tool.meta or {}), name
+
+
+def test_upload_asset_downloads_a_chatgpt_file(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_upload_asset(self, **kwargs):
+        calls.append(kwargs)
+        return {"id": "asset_1"}
+
+    monkeypatch.setattr("pinbridge_mcp.service.PinBridgeService.upload_asset", fake_upload_asset)
+    mcp = create_mcp_server(Settings(pinbridge_api_key="pb_local", enable_write_tools=True))
+    chat_file = {
+        "download_url": "https://files.example.com/file_1?sig=abc",
+        "file_id": "file_1",
+        "mime_type": "image/png",
+        "file_name": "folder-system.png",
+    }
+    asyncio.run(mcp.call_tool("upload_asset", {"filename": "pin.png", "file": chat_file}))
+    assert calls[-1]["file_url"] == "https://files.example.com/file_1?sig=abc"
+    assert calls[-1]["content_type"] == "image/png"
+    assert calls[-1]["content_base64"] is None
+
+    # ChatGPT may leave out mime_type and file_name; an explicit content_type wins.
+    minimal = {"download_url": "https://files.example.com/file_2", "file_id": "file_2"}
+    asyncio.run(
+        mcp.call_tool(
+            "upload_asset", {"filename": "a.jpg", "file": minimal, "content_type": "image/jpeg"}
+        )
+    )
+    assert calls[-1]["file_url"] == "https://files.example.com/file_2"
+    assert calls[-1]["content_type"] == "image/jpeg"
+
+
 def test_list_pins_returns_the_page_as_structured_content(monkeypatch) -> None:
     page = {"items": [{"id": "pin-1"}], "total": 41, "limit": 20, "offset": 20, "has_more": True}
 

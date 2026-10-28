@@ -38,7 +38,7 @@ Write tools (registered when `PINBRIDGE_MCP_ENABLE_WRITE_TOOLS=true`):
 
 | Area | Tools |
 |---|---|
-| Media | `upload_asset` (base64 or a public URL the server downloads; returns an `asset_id`), `delete_asset` (removes it from PinBridge storage; refuses while a pin or pending scheduled pin uses it unless `confirm=true`) |
+| Media | `upload_asset` (a file the client hands over by link, such as an image attached to or generated in a ChatGPT chat, base64, or a public URL the server downloads; returns an `asset_id`), `delete_asset` (removes it from PinBridge storage; refuses while a pin or pending scheduled pin uses it unless `confirm=true`) |
 | Pins | `create_pin` (`dry_run` runs every API check, publishes nothing), `create_pins_batch`, `update_pin` (only before a pin publishes; published pins cannot be edited), `delete_pin` (Pinterest-side by default), `retry_pin` |
 | Schedules | `create_schedule` (`dry_run`), `update_schedule` (edit a pending schedule in place), `cancel_schedule`, `retry_schedule` (failed → queued, or scheduled when no pin was created yet), `delete_schedule` (finished schedules only) |
 | Boards | `create_board`, `update_board` (name / description / privacy; `SECRET` needs a connection made with `boards:write_secret`), `delete_board` (deletes the board and its pins on Pinterest) |
