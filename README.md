@@ -2,11 +2,12 @@
 
 [![pinbridge MCP connector – tool definition quality and endpoint health on Glama](https://glama.ai/mcp/connectors/io.pinbridge/pinbridge/badges/score.svg)](https://glama.ai/mcp/connectors/io.pinbridge/pinbridge)
 
-`pinbridge-mcp` is the MCP server behind `https://mcp.pinbridge.io`. It lets an AI assistant (Claude, Cursor, any MCP client) publish, schedule, edit and measure Pinterest pins through the [PinBridge API](https://api.pinbridge.io/docs).
+`pinbridge-mcp` is the MCP server behind `https://mcp.pinbridge.io`. It lets an AI assistant (Claude, ChatGPT, Cursor, any MCP client) publish, schedule, edit and measure Pinterest pins through the [PinBridge API](https://api.pinbridge.io/docs).
 
 **Using it, not running it?** Start with the website:
 
 - [Connect PinBridge to your AI assistant](https://www.pinbridge.io/docs/mcp/setup/) — API key or OAuth, client config, first pin
+- [PinBridge in ChatGPT](https://www.pinbridge.io/chatgpt-pinterest/): install the PinBridge plugin from ChatGPT's Plugins directory and sign in, nothing to configure
 - [MCP documentation](https://www.pinbridge.io/docs/mcp/) and [usage policy](https://www.pinbridge.io/docs/mcp/usage-policy/)
 - [Product page](https://www.pinbridge.io/mcp/)
 
@@ -15,7 +16,7 @@ This README covers the server itself: tools, auth, configuration and self-hostin
 ## What it provides
 
 - streamable HTTP transport (stateless, JSON responses) for remote hosting, `stdio` for local use
-- two ways to authenticate: a PinBridge API key as a bearer token, or the OAuth 2.1 flow (with dynamic client registration) so clients such as Claude connect without a pasted key
+- two ways to authenticate: a PinBridge API key as a bearer token, or the OAuth 2.1 flow (with dynamic client registration) so clients such as Claude and ChatGPT connect without a pasted key
 - the full publishing loop: upload → dry run → publish → measure → edit / delete / retry
 - MCP annotations on every tool, resources for accounts and boards, and a `publish_pin` prompt
 
@@ -95,7 +96,7 @@ Authorization: Bearer pb_<64 hex characters>
 
 The token is passed through to the PinBridge API; the server keeps no credential store. Keys are verified against the API on first use and cached for `PINBRIDGE_MCP_AUTH_CACHE_TTL_SECONDS`. A key's scopes (`read`, `write`, `destructive`) and Pinterest-account allow-list apply to every tool call.
 
-**OAuth.** With no header, an OAuth-capable client discovers the authorization server through `/.well-known/oauth-protected-resource` (RFC 9728), which points at the PinBridge API. The API implements OAuth 2.1 with dynamic client registration; the user signs in, picks a workspace, and the resulting token is a PinBridge API key that shows up in their key list and can be revoked like any other. The [setup guide](https://www.pinbridge.io/docs/mcp/setup/) walks through it for Claude.
+**OAuth.** With no header, an OAuth-capable client discovers the authorization server through `/.well-known/oauth-protected-resource` (RFC 9728), which points at the PinBridge API. The API implements OAuth 2.1 with dynamic client registration; the user signs in, picks a workspace, and the resulting token is a PinBridge API key that shows up in their key list and can be revoked like any other. The [setup guide](https://www.pinbridge.io/docs/mcp/setup/) walks through it for Claude and ChatGPT.
 
 **Plan gate and quota.** `PINBRIDGE_MCP_MIN_PLAN` rejects keys whose workspace plan is below the minimum. With `PINBRIDGE_MCP_ENABLE_QUOTA=true` every tool call is checked against the workspace's weekly assistant-request quota via the API and counted afterwards. The handshake, tool listing and resource reads are never counted. Once the week's requests are used up, a tool call fails with the API's upgrade message (the plan that lifts the limit and a pricing link), so the assistant can show it to the person. Quota checks fail open if the API is unreachable.
 
