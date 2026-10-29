@@ -1281,6 +1281,9 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         image_url: ImageUrl = None,
         asset_id: AssetId = None,
         description: Description = None,
+        alt_text: Annotated[
+            str | None, Field(description="Accessibility text for the image, <= 500 characters.")
+        ] = None,
         link_url: LinkUrl = None,
         cover_image_url: CoverImageUrl = None,
         cover_image_asset_id: CoverImageAssetId = None,
@@ -1308,6 +1311,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
                 image_url=image_url,
                 asset_id=asset_id,
                 description=description,
+                alt_text=alt_text,
                 link_url=link_url,
                 cover_image_url=cover_image_url,
                 cover_image_asset_id=cover_image_asset_id,
@@ -1325,6 +1329,9 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         board_id: OptionalBoardId = None,
         title: OptionalTitle = None,
         description: Description = None,
+        alt_text: Annotated[
+            str | None, Field(description="New accessibility text, <= 500 characters.")
+        ] = None,
         link_url: LinkUrl = None,
         image_url: Annotated[
             str | None,
@@ -1339,8 +1346,8 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
     ) -> dict:
         """Edit a pending schedule in place: time, board, text or media.
 
-        Use to fix a wrong run_at, board, title or link on a schedule that has
-        not started publishing, instead of cancel_schedule plus
+        Use to fix a wrong run_at, board, title, link or alt text on a schedule
+        that has not started publishing, instead of cancel_schedule plus
         create_schedule; the id and history are kept. Once the schedule has
         run its pin is published and can no longer be edited; for a failed one
         use retry_schedule. Pass at least one field.
@@ -1359,6 +1366,7 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
                 board_id=board_id,
                 title=title,
                 description=description,
+                alt_text=alt_text,
                 link_url=link_url,
                 image_url=image_url,
                 asset_id=asset_id,
