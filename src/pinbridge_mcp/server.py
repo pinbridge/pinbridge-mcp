@@ -36,7 +36,6 @@ class PinInput(BaseModel):
     description: str | None = Field(
         default=None, description="Pin description (<= 800 characters).", max_length=800
     )
-    related_terms: list[str] | None = Field(default=None, description="Discovery keywords.")
     alt_text: str | None = Field(default=None, description="Accessibility text for the image.")
     dominant_color: str | None = Field(default=None, description="Hex color, e.g. #FF5733.")
     cover_image_url: str | None = Field(default=None, description="Video cover image URL.")
@@ -603,9 +602,8 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
     ) -> dict:
         """Look up the search terms Pinterest associates with your seed keywords.
 
-        Use while drafting a description or choosing related_terms for
-        create_pin; it reads Pinterest's own suggestions. Not needed for
-        publishing itself.
+        Use while drafting a pin's title and description; it reads Pinterest's
+        own suggestions. Not needed for publishing itself.
 
         Returns id, related_term_count and related_terms_list (term plus its
         related terms). Counts against the workspace's Pinterest read limit and
@@ -1095,9 +1093,6 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         image_url: ImageUrl = None,
         asset_id: AssetId = None,
         description: Description = None,
-        related_terms: Annotated[
-            list[str] | None, Field(description="Keywords that improve discoverability.")
-        ] = None,
         alt_text: Annotated[
             str | None, Field(description="Accessibility text for the image, <= 500 characters.")
         ] = None,
@@ -1139,7 +1134,6 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
                 image_url=image_url,
                 asset_id=asset_id,
                 description=description,
-                related_terms=related_terms,
                 alt_text=alt_text,
                 dominant_color=dominant_color,
                 cover_image_url=cover_image_url,

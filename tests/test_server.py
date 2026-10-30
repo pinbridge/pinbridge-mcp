@@ -310,6 +310,36 @@ def test_upload_asset_downloads_a_chatgpt_file(monkeypatch) -> None:
     assert calls[-1]["content_type"] == "image/jpeg"
 
 
+def test_create_pin_tools_drop_related_terms_from_older_clients(monkeypatch) -> None:
+    tools = _tools(enable_write_tools=True)
+    assert "related_terms" not in tools["create_pin"].inputSchema["properties"]
+    batch_schema = tools["create_pins_batch"].inputSchema
+    assert "related_terms" not in batch_schema["$defs"]["PinInput"]["properties"]
+
+    calls: list[dict[str, Any]] = []
+
+    async def fake_create(self, **kwargs):
+        calls.append(kwargs)
+        return {"id": "pin_1"}
+
+    monkeypatch.setattr("pinbridge_mcp.service.PinBridgeService.create_pin", fake_create)
+    monkeypatch.setattr("pinbridge_mcp.service.PinBridgeService.create_pins_batch", fake_create)
+    mcp = create_mcp_server(Settings(pinbridge_api_key="pb_local", enable_write_tools=True))
+
+    # A client holding the older tool schema, such as ChatGPT before a rescan, still sends it.
+    pin = {
+        "account_id": "acct_1",
+        "board_id": "b1",
+        "title": "T",
+        "image_url": "https://x/y.png",
+        "related_terms": ["old"],
+    }
+    asyncio.run(mcp.call_tool("create_pin", pin))
+    assert "related_terms" not in calls[-1]
+    asyncio.run(mcp.call_tool("create_pins_batch", {"pins": [pin]}))
+    assert "related_terms" not in str(calls[-1])
+
+
 def test_schedule_tools_take_alt_text_like_create_pin(monkeypatch) -> None:
     tools = _tools(enable_write_tools=True)
     for name in ("create_pin", "create_schedule", "update_schedule"):
