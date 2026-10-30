@@ -326,7 +326,7 @@ def test_create_pin_tools_drop_related_terms_from_older_clients(monkeypatch) -> 
     monkeypatch.setattr("pinbridge_mcp.service.PinBridgeService.create_pins_batch", fake_create)
     mcp = create_mcp_server(Settings(pinbridge_api_key="pb_local", enable_write_tools=True))
 
-    # A client holding the older tool schema, such as ChatGPT before a rescan, still sends it.
+    # A client holding the older tool schema still sends it.
     pin = {
         "account_id": "acct_1",
         "board_id": "b1",
@@ -337,6 +337,7 @@ def test_create_pin_tools_drop_related_terms_from_older_clients(monkeypatch) -> 
     asyncio.run(mcp.call_tool("create_pin", pin))
     assert "related_terms" not in calls[-1]
     asyncio.run(mcp.call_tool("create_pins_batch", {"pins": [pin]}))
+    assert len(calls) == 2
     assert "related_terms" not in str(calls[-1])
 
 
