@@ -318,8 +318,8 @@ def test_create_pin_tools_drop_related_terms_from_older_clients(monkeypatch) -> 
 
     calls: list[dict[str, Any]] = []
 
-    async def fake_create(self, **kwargs):
-        calls.append(kwargs)
+    async def fake_create(self, *args, **kwargs):
+        calls.append({"args": args, **kwargs})
         return {"id": "pin_1"}
 
     monkeypatch.setattr("pinbridge_mcp.service.PinBridgeService.create_pin", fake_create)

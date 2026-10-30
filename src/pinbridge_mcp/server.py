@@ -602,8 +602,8 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
     ) -> dict:
         """Look up the search terms Pinterest associates with your seed keywords.
 
-        Use while drafting a pin's title and description; it reads Pinterest's
-        own suggestions. Not needed for publishing itself.
+        Use while drafting the title and description for create_pin; it reads
+        Pinterest's own suggestions. Not needed for publishing itself.
 
         Returns id, related_term_count and related_terms_list (term plus its
         related terms). Counts against the workspace's Pinterest read limit and
