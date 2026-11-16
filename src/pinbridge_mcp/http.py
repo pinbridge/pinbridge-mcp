@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from starlette.applications import Starlette
@@ -41,6 +41,28 @@ async def oauth_protected_resource(_: object) -> JSONResponse:
     )
 
 
+GOOGLE_CONNECTED_APPS_PATH = "/.well-known/google-connected-apps"
+
+
+def google_connected_apps_endpoint(
+    settings: Settings,
+) -> Callable[[object], Awaitable[JSONResponse]]:
+    """Domain-ownership file for Google's Connected Console.
+
+    Google fetches it when it verifies the MCP domain and wants 200, no redirect,
+    and the console's tokens in ``verification_tokens``. With no token configured
+    the path is a 404, so the server never claims a verification it doesn't have.
+    """
+
+    async def google_connected_apps(_: object) -> JSONResponse:
+        tokens = settings.google_connected_apps_token_list
+        if not tokens:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        return JSONResponse({"verification_tokens": tokens})
+
+    return google_connected_apps
+
+
 def create_app(settings: Settings | None = None) -> Starlette:
     """Create the Starlette app used for streamable HTTP hosting."""
     settings = settings or get_settings()
@@ -59,6 +81,11 @@ def create_app(settings: Settings | None = None) -> Starlette:
             Route(
                 "/.well-known/oauth-protected-resource",
                 endpoint=oauth_protected_resource,
+                methods=["GET"],
+            ),
+            Route(
+                GOOGLE_CONNECTED_APPS_PATH,
+                endpoint=google_connected_apps_endpoint(settings),
                 methods=["GET"],
             ),
             Mount("/", app=mcp_app),

@@ -179,6 +179,7 @@ class APIKeyPassthroughMiddleware:
         if (
             path == "/healthz"
             or path == "/.well-known/oauth-protected-resource"
+            or path == "/.well-known/google-connected-apps"
             or method == "OPTIONS"
         ):
             await self.app(scope, receive, send)
