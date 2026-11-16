@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     # Weekly assistant-request quota, counted per tool call through the API (db-backed)
     enable_quota: bool = True
 
+    # Google Connected Console domain check, served at /.well-known/google-connected-apps.
+    # Comma-separated tokens from the console's google-connected-apps.json. Empty = 404.
+    google_connected_apps_tokens: str = ""
+
     @property
     def normalized_public_base_url(self) -> str:
         return self.public_base_url.rstrip("/")
@@ -39,6 +43,10 @@ class Settings(BaseSettings):
     @property
     def normalized_app_base_url(self) -> str:
         return self.app_base_url.rstrip("/")
+
+    @property
+    def google_connected_apps_token_list(self) -> list[str]:
+        return [t.strip() for t in self.google_connected_apps_tokens.split(",") if t.strip()]
 
 
 @lru_cache(maxsize=1)

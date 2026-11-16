@@ -139,7 +139,7 @@ HTTP mode:
 poetry run pinbridge-mcp --transport http --host 127.0.0.1 --port 57289
 ```
 
-Connect an MCP client to `http://127.0.0.1:57289/` with an `Authorization: Bearer pb_...` header. `/healthz` answers without auth. To target a local API stack instead of production, set `PINBRIDGE_MCP_PINBRIDGE_BASE_URL` (for example `http://127.0.0.1:8976` for the compose stack below).
+Connect an MCP client to `http://127.0.0.1:57289/` with an `Authorization: Bearer pb_...` header. `/healthz`, the protected-resource metadata and `/.well-known/google-connected-apps` answer without auth. That last one is Google's domain check: it serves the tokens in `PINBRIDGE_MCP_GOOGLE_CONNECTED_APPS_TOKENS` and is a 404 while that is empty. To target a local API stack instead of production, set `PINBRIDGE_MCP_PINBRIDGE_BASE_URL` (for example `http://127.0.0.1:8976` for the compose stack below).
 
 Tests and lint:
 

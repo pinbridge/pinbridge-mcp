@@ -104,6 +104,34 @@ def test_protected_resource_metadata_advertises_scope() -> None:
     assert body["authorization_servers"] == ["https://api.pinbridge.io"]
 
 
+def test_google_domain_check_is_open_and_serves_the_configured_tokens() -> None:
+    from starlette.testclient import TestClient
+
+    from pinbridge_mcp.http import create_app
+
+    settings = Settings(
+        verify_incoming_api_keys=True,
+        enable_quota=False,
+        google_connected_apps_tokens="tok-one, tok-two",
+    )
+    with TestClient(create_app(settings)) as client:
+        resp = client.get("/.well-known/google-connected-apps", follow_redirects=False)
+        # Every other path still asks for a key.
+        assert client.get("/.well-known/something-else").status_code == 401
+    assert resp.status_code == 200
+    assert resp.json() == {"verification_tokens": ["tok-one", "tok-two"]}
+
+
+def test_google_domain_check_is_404_until_a_token_is_set() -> None:
+    from starlette.testclient import TestClient
+
+    from pinbridge_mcp.http import create_app
+
+    with TestClient(create_app(Settings(enable_quota=False))) as client:
+        resp = client.get("/.well-known/google-connected-apps", follow_redirects=False)
+    assert resp.status_code == 404
+
+
 def test_write_server_registers_every_roadmap_tool_with_annotations() -> None:
     tools = _tools(enable_write_tools=True)
     assert set(tools) == READ_ONLY_TOOLS | WRITE_TOOLS
