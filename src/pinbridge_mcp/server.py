@@ -892,9 +892,10 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
         Use before a large create_pins_batch or after quota_exceeded to see how
         many publishes remain, and to check plan features before upload_asset
-        (uploaded_media_assets; Playground uploads 5 images a month without it)
-        or create_pins_batch (bulk_imports). For Pinterest's per-account publish
-        rate use get_rate_meter; for pin performance use get_account_analytics.
+        (uploaded_media_assets; a workspace without it can still upload a few
+        images a month) or create_pins_batch (bulk_imports). For Pinterest's
+        per-account publish rate use get_rate_meter; for pin performance use
+        get_account_analytics.
 
         Returns plan, billing_status, quota_calls_monthly, calls_used,
         quota_reset_at, quota_exhausted, credits_remaining, storage_used_bytes /
@@ -1038,12 +1039,13 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
 
         Returns id (use as asset_id), public_url, asset_type, content_type,
         size_bytes, created_at. Files are capped at 200 MB (plans cap lower).
-        The free Playground plan uploads 5 images a month (10 MB each) and no
-        videos: past that it fails with image_upload_limit, and a video with
-        feature_unavailable; both carry an upgrade link, and a public image_url
-        still works for create_pin. Also fails with validation_error for
-        unsupported media, and invalid_image when the file is truncated or
-        corrupted (re-encode the exact original bytes; never retype base64 by hand).
+        Plans differ in how many images can be uploaded each month and whether
+        videos can be uploaded. Past a limit it fails with image_upload_limit,
+        and an upload the plan does not include fails with feature_unavailable.
+        Either way, a public image_url still works for create_pin. Also fails
+        with validation_error for unsupported media, and invalid_image when the
+        file is truncated or corrupted (re-encode the exact original bytes;
+        never retype base64 by hand).
         """
         return await guarded(
             lambda: service.upload_asset(

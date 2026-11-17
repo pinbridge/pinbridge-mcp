@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from typing import Any
 
 from pinbridge_mcp.config import Settings
@@ -510,6 +512,40 @@ def test_instructions_cover_plan_limits_and_the_connect_step() -> None:
     assert "when it resets" in instructions
     assert "connect_url" in instructions
     assert "pinterest_not_connected" in instructions
+
+
+# Plan names, prices and upgrade talk. OpenAI's tool review held upload_asset in 1.4.6
+# for "The free Playground plan uploads 5 images a month ... an upgrade link" (DEV-860).
+PLAN_TALK = re.compile(
+    r"\b(upgrade\w*|pricing|prices?|subscriptions?|free|trials?|playground|starter|growth"
+    r"|agency|enterprise|paid|premium)\b|\$\d",
+    re.IGNORECASE,
+)
+
+
+def test_tool_texts_stay_within_directory_review_rules() -> None:
+    """Tool metadata must not name plans, prices or upgrades, or OpenAI holds the update."""
+    for name, tool in _tools(enable_write_tools=True).items():
+        title = tool.annotations.title if tool.annotations else None
+        text = " ".join(
+            [
+                tool.description or "",
+                title or "",
+                json.dumps(tool.inputSchema),
+                json.dumps(tool.outputSchema or {}),
+            ]
+        )
+        found = sorted({match.group(0).lower() for match in PLAN_TALK.finditer(text)})
+        assert not found, f"{name}: {found}"
+
+
+def test_prompts_and_resources_stay_within_directory_review_rules() -> None:
+    mcp = create_mcp_server(Settings(pinbridge_api_key="pb_local", enable_write_tools=True))
+    texts = [mcp.instructions or ""]
+    texts += [p.description or "" for p in asyncio.run(mcp.list_prompts())]
+    texts += [r.description or "" for r in asyncio.run(mcp.list_resources())]
+    for text in texts:
+        assert not PLAN_TALK.search(text), text[:80]
 
 
 def test_instructions_stay_within_directory_review_rules() -> None:
