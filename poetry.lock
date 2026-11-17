@@ -485,14 +485,14 @@ files = [
 
 [[package]]
 name = "pinbridge-sdk"
-version = "1.10.1"
+version = "1.11.0"
 description = "Official Python SDK for the PinBridge API"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "pinbridge_sdk-1.10.1-py3-none-any.whl", hash = "sha256:184437750026c9be2fc2c73eb0020efd6107fa7429eeaddd13e1c4dbce308469"},
-    {file = "pinbridge_sdk-1.10.1.tar.gz", hash = "sha256:d4f33c4a21ab4c962ffed1237de5af6f4339fcaeae200c32d66145ba106f9fbf"},
+    {file = "pinbridge_sdk-1.11.0-py3-none-any.whl", hash = "sha256:6569a99b5b380c54ad43aa633449f1faecfab0c487368881237523ca85d392cf"},
+    {file = "pinbridge_sdk-1.11.0.tar.gz", hash = "sha256:4df40b35f2bff3d90ad8eb375b4df05daf89bcfed19b27ab969587a4b2499d97"},
 ]
 
 [package.dependencies]
@@ -501,7 +501,7 @@ pydantic = ">=2.6.0,<3"
 
 [package.extras]
 dev = ["black (>=24.0.0,<25)", "coverage[toml] (>=7.0.0,<8)", "pytest (>=8.0.0,<9)", "pytest-asyncio (>=0.23.0,<1)", "pytest-cov (>=5.0.0,<6)", "ruff (>=0.5.0,<1)", "tomli (>=2.0.0,<3) ; python_version < \"3.11\""]
-docs = ["mkdocs (>=1.6.0,<2)", "mkdocs-material (>=9.5.0,<10)", "mkdocstrings[python] (>=0.26.0,<1)"]
+docs = ["mkdocs (>=1.6.0,<2)", "mkdocs-material (>=9.5.0,<10)", "mkdocstrings[python] (>=1.0,<2)"]
 
 [[package]]
 name = "pluggy"
@@ -1156,4 +1156,4 @@ standard = ["colorama (>=0.4) ; sys_platform == \"win32\"", "httptools (>=0.6.3)
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.12"
-content-hash = "f1d9caa331f444b694979250abed66ea4e7f18b125263b13ba352589c1601342"
+content-hash = "feed2b12a8841c28a4361d8cf1bfd6a4fc6847cd83a2b00eadac63775b0ba25f"
