@@ -1108,3 +1108,51 @@ def test_format_error_adds_a_link_the_remediation_lacks() -> None:
     )
     text = PinBridgeService.format_error(error)
     assert text.endswith(f"Connect: {url}")
+
+
+def test_schedule_answer_keeps_the_api_warnings() -> None:
+    """create_schedule answers with the SDK model; its warnings must reach the client (DEV-853)."""
+    from pinbridge_sdk.models import ScheduleResponse
+
+    from pinbridge_mcp.service import _dump
+
+    api_answer = {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "workspace_id": "22222222-2222-2222-2222-222222222222",
+        "pinterest_account_id": "33333333-3333-3333-3333-333333333333",
+        "run_at": "2030-01-01T10:00:00Z",
+        "status": "scheduled",
+        "payload": {"board_id": "b1", "title": "T"},
+        "created_at": "2026-11-17T10:00:00Z",
+        "updated_at": "2026-11-17T10:00:00Z",
+        "warnings": [
+            {
+                "code": "media_link_may_expire",
+                "message": "image_url is a Dropbox temporary link.",
+                "remediation": "Upload the file and set asset_id on the schedule.",
+                "field": "image_url",
+                "expires_at": "2030-01-01T09:00:00Z",
+            }
+        ],
+    }
+
+    answer = _dump(ScheduleResponse.model_validate(api_answer))
+
+    assert answer["warnings"] == [
+        {
+            "code": "media_link_may_expire",
+            "message": "image_url is a Dropbox temporary link.",
+            "remediation": "Upload the file and set asset_id on the schedule.",
+            "field": "image_url",
+            "expires_at": "2030-01-01T09:00:00Z",
+            "limit_type": None,
+            "plan": None,
+            "plan_name": None,
+            "limit": None,
+            "used": None,
+            "recommended_plan": None,
+            "recommended_plan_name": None,
+            "recommended_limit": None,
+            "upgrade_url": None,
+        }
+    ]
