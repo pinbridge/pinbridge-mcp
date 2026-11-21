@@ -7,6 +7,9 @@ import json
 import re
 from typing import Any
 
+import pytest
+from mcp.server.fastmcp.exceptions import ToolError
+
 from pinbridge_mcp.config import Settings
 from pinbridge_mcp.server import create_mcp_server
 
@@ -558,3 +561,54 @@ def test_instructions_stay_within_directory_review_rules() -> None:
     lowered = instructions.lower()
     for banned in ("api key", "bearer", "env var", "upgrade", "pricing", "subscription"):
         assert banned not in lowered, banned
+
+
+def test_write_tools_take_ai_disclosures_with_pinterest_values(monkeypatch) -> None:
+    """DEV-913: the labels are an enum of Pinterest's two values on every write tool."""
+    tools = _tools(enable_write_tools=True)
+    for name in ("create_pin", "create_schedule", "update_schedule", "update_pin"):
+        prop = tools[name].inputSchema["properties"]["ai_disclosures"]
+        assert "AI_MODIFIED" in str(prop) and "SYNTHETIC_PERFORMER" in str(prop), name
+        assert "ai_disclosures" not in tools[name].inputSchema.get("required", []), name
+    batch_item = str(tools["create_pins_batch"].inputSchema)
+    assert "ai_disclosures" in batch_item and "SYNTHETIC_PERFORMER" in batch_item
+
+    calls: list[dict[str, Any]] = []
+
+    async def fake_create_pin(self, **kwargs):
+        calls.append(kwargs)
+        return {"id": "pin_1"}
+
+    async def fake_update_schedule(self, schedule_id, **kwargs):
+        calls.append(kwargs)
+        return {"id": schedule_id}
+
+    async def fake_batch(self, pins):
+        calls.append({"pins": pins})
+        return {"created_count": len(pins)}
+
+    monkeypatch.setattr("pinbridge_mcp.service.PinBridgeService.create_pin", fake_create_pin)
+    monkeypatch.setattr(
+        "pinbridge_mcp.service.PinBridgeService.update_schedule", fake_update_schedule
+    )
+    monkeypatch.setattr("pinbridge_mcp.service.PinBridgeService.create_pins_batch", fake_batch)
+    mcp = create_mcp_server(Settings(pinbridge_api_key="pb_local", enable_write_tools=True))
+
+    pin = {
+        "account_id": "acct_1",
+        "board_id": "b1",
+        "title": "Soup",
+        "image_url": "https://example.com/soup.jpg",
+        "ai_disclosures": ["AI_MODIFIED"],
+    }
+    asyncio.run(mcp.call_tool("create_pin", pin))
+    assert calls[-1]["ai_disclosures"] == ["AI_MODIFIED"]
+
+    asyncio.run(mcp.call_tool("create_pins_batch", {"pins": [pin]}))
+    assert calls[-1]["pins"][0]["ai_disclosures"] == ["AI_MODIFIED"]
+
+    asyncio.run(mcp.call_tool("update_schedule", {"schedule_id": "sched_1", "ai_disclosures": []}))
+    assert calls[-1]["ai_disclosures"] == []
+
+    with pytest.raises(ToolError):
+        asyncio.run(mcp.call_tool("create_pin", {**pin, "ai_disclosures": ["MADE_WITH_AI"]}))

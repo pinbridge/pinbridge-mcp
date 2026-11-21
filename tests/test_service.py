@@ -201,6 +201,12 @@ class _FakeClient:
             )
         if path == "/v1/schedules/validate":
             return _FakeResponse({"valid": False, "dry_run": True, "checks": [{"name": "run_at"}]})
+        if path == "/v1/pins" and method == "POST":
+            return _FakeResponse({"id": "pin_new", "status": "queued", **kwargs["json"]})
+        if path == "/v1/pins/{pin_id}" and method == "GET":
+            return _FakeResponse(
+                {"id": kwargs["path_params"]["pin_id"], "title": "Demo pin", "ai_disclosures": []}
+            )
         if path == "/v1/pins/batch":
             return _FakeResponse({"created_count": len(kwargs["json"]["pins"]), "results": []})
         if path == "/v1/schedules/{schedule_id}" and method == "PATCH":
@@ -494,6 +500,8 @@ def test_create_pin_dry_run_validates_instead_of_publishing() -> None:
         )
         assert created["status"] == "queued"
         assert "description" not in created  # None fields are not sent
+        assert _last_request()["method"] == "POST"
+        assert _last_request()["path"] == "/v1/pins"
 
     asyncio.run(run())
 
@@ -1156,3 +1164,63 @@ def test_schedule_answer_keeps_the_api_warnings() -> None:
             "upgrade_url": None,
         }
     ]
+
+
+def test_ai_disclosures_reach_the_api_on_every_write() -> None:
+    """DEV-913: the labels go to the API on create, dry run, schedule and both edits."""
+    service = _service()
+    labels = ["AI_MODIFIED", "SYNTHETIC_PERFORMER"]
+
+    async def run() -> None:
+        pin_fields = {
+            "account_id": "acct_1",
+            "board_id": "b1",
+            "title": "T",
+            "image_url": "https://x/y.png",
+            "ai_disclosures": labels,
+        }
+        await service.create_pin(**pin_fields, dry_run=True)
+        assert _last_request()["json"]["ai_disclosures"] == labels
+
+        created = await service.create_pin(**pin_fields)
+        assert _last_request()["json"]["ai_disclosures"] == labels
+        # The raw API answer is returned, so the labels show in the result.
+        assert created["ai_disclosures"] == labels
+
+        await service.update_pin("pin_1", ai_disclosures=[])
+        assert _last_request()["json"] == {"ai_disclosures": []}
+
+        schedule_fields = {
+            "account_id": "acct_1",
+            "board_id": "b1",
+            "title": "T",
+            "run_at": "2030-01-01T10:00:00Z",
+            "image_url": "https://x/y.png",
+            "ai_disclosures": ["AI_MODIFIED"],
+        }
+        await service.create_schedule(**schedule_fields, dry_run=True)
+        assert _last_request()["json"]["ai_disclosures"] == ["AI_MODIFIED"]
+        created_schedule = await service.create_schedule(**schedule_fields)
+        assert created_schedule["ai_disclosures"] == ["AI_MODIFIED"]
+
+        await service.update_schedule("sched_1", ai_disclosures=["SYNTHETIC_PERFORMER"])
+        assert _last_request()["json"] == {"ai_disclosures": ["SYNTHETIC_PERFORMER"]}
+
+        plain = await service.create_pin(
+            account_id="acct_1", board_id="b1", title="T", image_url="https://x/y.png"
+        )
+        assert "ai_disclosures" not in _last_request()["json"]
+        assert plain["status"] == "queued"
+
+    asyncio.run(run())
+
+
+def test_get_pin_returns_the_api_json() -> None:
+    service = _service()
+
+    async def run() -> None:
+        pin = await service.get_pin("pin_9")
+        assert pin == {"id": "pin_9", "title": "Demo pin", "ai_disclosures": []}
+        assert _last_request()["path_params"] == {"pin_id": "pin_9"}
+
+    asyncio.run(run())
