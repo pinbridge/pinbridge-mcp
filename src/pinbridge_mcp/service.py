@@ -428,8 +428,10 @@ class PinBridgeService:
 
     async def get_pin(self, pin_id: str) -> dict[str, Any]:
         async with self.client() as client:
-            pin = await client.pins.get(pin_id)
-        return _dump(pin)
+            response = await client.request(
+                "GET", "/v1/pins/{pin_id}", path_params={"pin_id": pin_id}
+            )
+        return response.json()
 
     def _pin_payload(
         self,
@@ -446,6 +448,7 @@ class PinBridgeService:
         cover_image_asset_id: str | None,
         link_url: str | None,
         idempotency_key: str | None,
+        ai_disclosures: list[str] | None = None,
     ) -> dict[str, Any]:
         return _clean(
             {
@@ -454,6 +457,7 @@ class PinBridgeService:
                 "title": title,
                 "description": description,
                 "alt_text": alt_text,
+                "ai_disclosures": ai_disclosures,
                 "dominant_color": dominant_color,
                 "cover_image_url": cover_image_url,
                 "cover_image_asset_id": cover_image_asset_id,
@@ -485,6 +489,7 @@ class PinBridgeService:
         link_url: str | None = None,
         idempotency_key: str | None = None,
         dry_run: bool = False,
+        ai_disclosures: list[str] | None = None,
     ) -> dict[str, Any]:
         payload = self._pin_payload(
             account_id=account_id,
@@ -499,12 +504,15 @@ class PinBridgeService:
             cover_image_asset_id=cover_image_asset_id,
             link_url=link_url,
             idempotency_key=idempotency_key,
+            ai_disclosures=ai_disclosures,
         )
         if dry_run:
             return await self.validate_pin(payload)
+        # Raw JSON rather than the SDK model, which drops fields newer than the SDK
+        # (ai_disclosures, DEV-913).
         async with self.client() as client:
-            pin = await client.pins.create(payload)
-        return _dump(pin)
+            response = await client.request("POST", "/v1/pins", json=payload)
+        return response.json()
 
     async def create_pins_batch(self, pins: list[Mapping[str, Any]]) -> dict[str, Any]:
         if not pins:
@@ -530,6 +538,7 @@ class PinBridgeService:
         link_url: str | None = None,
         alt_text: str | None = None,
         board_id: str | None = None,
+        ai_disclosures: list[str] | None = None,
     ) -> dict[str, Any]:
         payload = _clean(
             {
@@ -537,6 +546,7 @@ class PinBridgeService:
                 "description": description,
                 "link_url": link_url,
                 "alt_text": alt_text,
+                "ai_disclosures": ai_disclosures,
                 "board_id": board_id,
             }
         )
@@ -759,6 +769,7 @@ class PinBridgeService:
         link_url: str | None,
         cover_image_url: str | None,
         cover_image_asset_id: str | None,
+        ai_disclosures: list[str] | None = None,
     ) -> dict[str, Any]:
         return _clean(
             {
@@ -770,6 +781,7 @@ class PinBridgeService:
                 "asset_id": asset_id,
                 "description": description,
                 "alt_text": alt_text,
+                "ai_disclosures": ai_disclosures,
                 "link_url": link_url,
                 "cover_image_url": cover_image_url,
                 "cover_image_asset_id": cover_image_asset_id,
@@ -796,6 +808,7 @@ class PinBridgeService:
         cover_image_url: str | None = None,
         cover_image_asset_id: str | None = None,
         dry_run: bool = False,
+        ai_disclosures: list[str] | None = None,
     ) -> dict[str, Any]:
         payload = self._schedule_payload(
             account_id=account_id,
@@ -809,6 +822,7 @@ class PinBridgeService:
             link_url=link_url,
             cover_image_url=cover_image_url,
             cover_image_asset_id=cover_image_asset_id,
+            ai_disclosures=ai_disclosures,
         )
         if dry_run:
             return await self.validate_schedule(payload)
@@ -870,6 +884,7 @@ class PinBridgeService:
         asset_id: str | None = None,
         cover_image_url: str | None = None,
         cover_image_asset_id: str | None = None,
+        ai_disclosures: list[str] | None = None,
     ) -> dict[str, Any]:
         payload = _clean(
             {
@@ -878,6 +893,7 @@ class PinBridgeService:
                 "title": title,
                 "description": description,
                 "alt_text": alt_text,
+                "ai_disclosures": ai_disclosures,
                 "link_url": link_url,
                 "image_url": image_url,
                 "asset_id": asset_id,
