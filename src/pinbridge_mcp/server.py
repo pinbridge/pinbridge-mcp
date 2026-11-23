@@ -1344,7 +1344,11 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
     async def create_pins_batch(
         pins: Annotated[
             list[PinInput],
-            Field(description="Up to 100 pins, each with the same fields as create_pin."),
+            Field(
+                description="Up to 100 pins, each with the same fields as create_pin.",
+                min_length=1,
+                max_length=100,
+            ),
         ],
     ) -> dict:
         """Publish several pins in one call with a per-entry outcome.

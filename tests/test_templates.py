@@ -118,8 +118,14 @@ class _TemplateClient:
             outcome = _TemplateClient.script.pop(0) if _TemplateClient.script else None
             if isinstance(outcome, Exception):
                 raise outcome
+            headers: dict[str, str] = {}
+            if isinstance(outcome, tuple):
+                outcome, headers = outcome
             body = outcome or {"created_at": "2999-01-01T00:00:00Z"}
-            return _Response({"id": f"pin-{kwargs['json']['title']}", **kwargs["json"], **body})
+            return _Response(
+                {"id": f"pin-{kwargs['json']['title']}", **kwargs["json"], **body},
+                headers=headers,
+            )
         if path in ("/v1/pins/validate", "/v1/schedules/validate"):
             return _Response({"valid": True, "resolved": kwargs["json"]})
         if path == "/v1/schedules" and method == "POST":
@@ -289,6 +295,17 @@ def test_batch_sends_template_entries_one_at_a_time(service: PinBridgeService) -
     assert answer["headroom"] == {"quota_remaining": 90}
 
 
+def test_batch_reads_replays_by_the_api_clock(service: PinBridgeService) -> None:
+    """Pin age is read against the API's Date header, so a skewed client clock is moot."""
+    created = {"created_at": "2026-01-01T00:00:00.400Z"}
+    _TemplateClient.script = [
+        (created, {"date": "Thu, 01 Jan 2026 00:00:00 GMT"}),  # saved during this request
+        (created, {"date": "Thu, 01 Jan 2026 00:00:03 GMT"}),  # saved 3 s before it
+    ]
+    answer = asyncio.run(service.create_pins_batch([_drawn("D0"), _drawn("D1")]))
+    assert [r["status"] for r in answer["results"]] == ["created", "existing"]
+
+
 def test_batch_of_image_pins_still_returns_the_api_answer(service: PinBridgeService) -> None:
     answer = asyncio.run(service.create_pins_batch([_plain("P0"), _plain("P1")]))
     assert answer["created_count"] == 2
@@ -317,11 +334,13 @@ def test_batch_waits_out_render_busy(service: PinBridgeService, monkeypatch) -> 
 def test_batch_marks_entries_past_the_time_budget_not_sent(
     service: PinBridgeService, monkeypatch
 ) -> None:
-    clock = iter([0.0, 1.0, 50.0, 51.0])
+    # Budget starts at 0 and ends at 45. D0 runs from 1 to 31, so D1 (at 31, with a
+    # 30-second draw behind it) would end past 45 and is not started; D2 neither.
+    clock = iter([0.0, 1.0, 31.0, 31.0, 31.0])
     monkeypatch.setattr(service_module, "_clock", lambda: next(clock))
-    answer = asyncio.run(service.create_pins_batch([_drawn("D0"), _drawn("D1")]))
-    assert [r["status"] for r in answer["results"]] == ["created", "not_sent"]
-    assert answer["not_sent_count"] == 1
+    answer = asyncio.run(service.create_pins_batch([_drawn("D0"), _drawn("D1"), _drawn("D2")]))
+    assert [r["status"] for r in answer["results"]] == ["created", "not_sent", "not_sent"]
+    assert answer["not_sent_count"] == 2
     assert answer["results"][1]["error"]["code"] == "not_sent"
     assert len([r for r in _requests() if r["path"] == "/v1/pins"]) == 1
 

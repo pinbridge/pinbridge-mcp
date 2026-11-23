@@ -17,6 +17,7 @@ import time
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urljoin, urlparse
 from uuid import uuid4
@@ -47,6 +48,9 @@ _BATCH_DRAW_BUDGET_SECONDS = 45.0
 # Retry-After the API gives (1 to 60 s, capped here).
 _RENDER_BUSY_RETRIES = 2
 _RENDER_BUSY_MAX_WAIT_SECONDS = 10
+# Indirections so tests can drive the batch's clock and waits.
+_clock = time.monotonic
+_sleep = asyncio.sleep
 TEMPLATES_NOT_AVAILABLE = (
     "PinBridge API error (404) [templates_not_available]: Pin templates are not turned on "
     "for this workspace yet. Fix: make the pin from an image instead (image_url or asset_id)."
@@ -304,8 +308,32 @@ def _entry_error(exc: Exception) -> dict[str, Any]:
     return {"code": "error", "message": str(exc)}
 
 
-def _created_before(pin: Any, started: datetime) -> bool:
-    """True when the API returned a pin made before this call: an idempotency-key hit."""
+def _sent_at(response: Any, elapsed: float) -> datetime:
+    """When the request reached the API, by the API's clock: its Date header minus the wait.
+
+    Using the API's clock keeps a client whose clock is off from misreading pin ages.
+    Without a Date header the local clock stands in.
+    """
+    answered: datetime | None = None
+    raw = getattr(response, "headers", {}).get("date")
+    if raw:
+        try:
+            answered = parsedate_to_datetime(raw)
+        except (TypeError, ValueError):
+            answered = None
+    if answered is None or answered.tzinfo is None:
+        answered = datetime.now().astimezone()
+    return answered - timedelta(seconds=elapsed)
+
+
+def _created_before(pin: Any, sent_at: datetime) -> bool:
+    """True when the API returned a pin made before the request: an idempotency-key hit.
+
+    POST /v1/pins answers 201 with the existing pin on a replay, so the pin's age is the
+    only sign. A new pin is saved while the request runs, so it is never older than
+    ``sent_at``: the Date header is rounded down and can lag, which only moves ``sent_at``
+    earlier. A replay of a pin made in the last second or two reads as created.
+    """
     if not isinstance(pin, Mapping) or not isinstance(pin.get("created_at"), str):
         return False
     try:
@@ -314,7 +342,7 @@ def _created_before(pin: Any, started: datetime) -> bool:
         return False
     if created.tzinfo is None:
         return False
-    return created < started - timedelta(seconds=5)
+    return created < sent_at - timedelta(seconds=0.5)
 
 
 def _page(response: Any, *, limit: int, offset: int) -> dict[str, Any]:
@@ -744,12 +772,17 @@ class PinBridgeService:
                 original = plain[result["index"]]
                 results[original] = {**result, "index": original}
 
-        deadline = time.monotonic() + _BATCH_DRAW_BUDGET_SECONDS
+        # No entry starts once the slowest draw so far would no longer fit in the budget,
+        # so one call stays well under the minute MCP clients tend to wait for a tool.
+        deadline = _clock() + _BATCH_DRAW_BUDGET_SECONDS
+        slowest = 0.0
         for index in drawn:
-            if time.monotonic() >= deadline:
+            begun = _clock()
+            if begun + slowest >= deadline:
                 results[index] = self._not_sent(index, entries[index])
                 continue
             results[index] = await self._create_drawn_pin(index, entries[index], deadline)
+            slowest = max(slowest, _clock() - begun)
 
         ordered = [results[index] for index in range(len(entries)) if index in results]
         counts = {status: 0 for status in ("created", "existing", "failed", "not_sent")}
@@ -770,7 +803,7 @@ class PinBridgeService:
         """Create one template-drawn pin of a batch, sending it again after render_busy."""
         key = entry["idempotency_key"]
         for attempt in range(_RENDER_BUSY_RETRIES + 1):
-            started = datetime.now().astimezone()
+            started = time.monotonic()
             try:
                 async with self.client(timeout=_TEMPLATE_DRAW_TIMEOUT_SECONDS) as client:
                     response = await client.request("POST", "/v1/pins", json=entry)
@@ -780,9 +813,9 @@ class PinBridgeService:
                 if (
                     error.get("code") == "render_busy"
                     and attempt < _RENDER_BUSY_RETRIES
-                    and time.monotonic() + wait < deadline
+                    and _clock() + wait < deadline
                 ):
-                    await asyncio.sleep(wait)
+                    await _sleep(wait)
                     continue
                 return {
                     "index": index,
@@ -792,10 +825,11 @@ class PinBridgeService:
                     "error": error,
                 }
             pin = response.json()
+            sent_at = _sent_at(response, time.monotonic() - started)
             return {
                 "index": index,
                 "idempotency_key": key,
-                "status": "existing" if _created_before(pin, started) else "created",
+                "status": "existing" if _created_before(pin, sent_at) else "created",
                 "pin": pin,
                 "error": None,
             }

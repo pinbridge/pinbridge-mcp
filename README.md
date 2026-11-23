@@ -31,6 +31,7 @@ Read tools (always registered):
 | Accounts and boards | `list_pinterest_accounts`, `list_boards`, `check_board_access`, `list_related_terms` |
 | Pins | `list_pins` (search `q`, `sort`, filters: account, board, status, error code, `removed`, since/until; slim summaries by default, `detail="full"` for every field; returns `items`, `total`, `has_more`), `get_pin`, `get_pin_analytics` (`source`: auto, stored or live; `include_daily=false` for totals only) |
 | Schedules | `list_schedules` (same search, sort and filters; `sort=run_at_asc` puts the next run first), `get_schedule` |
+| Templates | `list_templates` (the workspace's own and the gallery; `source`, `niche`, `q`, `sort`, paging), `get_template` (size, inputs and sample values; `detail="full"` adds the whole definition) |
 | Reporting | `get_dashboard_summary` (pin outcomes, success rate, previous-period comparison, hourly or daily series, queue and upcoming schedules for any range up to 366 days) |
 | Workspace | `get_account_analytics` (same `source` and `include_daily`), `list_activity_logs`, `list_webhooks`, `get_billing_status`, `get_rate_meter` |
 
@@ -39,7 +40,7 @@ Write tools (registered when `PINBRIDGE_MCP_ENABLE_WRITE_TOOLS=true`):
 | Area | Tools |
 |---|---|
 | Media | `upload_asset` (a file the client hands over by link, such as an image attached to or generated in a ChatGPT chat, base64, or a public URL the server downloads; returns an `asset_id`), `delete_asset` (removes it from PinBridge storage; refuses while a pin or pending scheduled pin uses it unless `confirm=true`) |
-| Pins | `create_pin` (`dry_run` runs every API check, publishes nothing), `create_pins_batch`, `update_pin` (only before a pin publishes; published pins cannot be edited), `delete_pin` (Pinterest-side by default), `retry_pin` |
+| Pins | `create_pin` (`dry_run` runs every API check, publishes nothing), `create_pins_batch` (template entries are drawn one at a time; see below), `update_pin` (only before a pin publishes; published pins cannot be edited), `delete_pin` (Pinterest-side by default), `retry_pin` |
 | Schedules | `create_schedule` (`dry_run`), `update_schedule` (edit a pending schedule in place), `cancel_schedule`, `retry_schedule` (failed → queued, or scheduled when no pin was created yet), `delete_schedule` (finished schedules only) |
 | Boards | `create_board`, `update_board` (name / description / privacy; `SECRET` needs a connection made with `boards:write_secret`), `delete_board` (deletes the board and its pins on Pinterest) |
 | Webhooks | `create_webhook`, `update_webhook` (partial; pause with `is_enabled=false`), `delete_webhook` |
@@ -63,6 +64,14 @@ Write tools (registered when `PINBRIDGE_MCP_ENABLE_WRITE_TOOLS=true`):
 - For the next page, repeat the call with the same filters, `q` and `sort`, and `offset = offset + limit`, while `has_more` is `true`.
 - `total` is `null` only against a PinBridge API older than 1.34. `has_more` then means "this page came back full".
 - `list_activity_logs` pages by cursor instead: pass `next_cursor` back as `cursor`.
+
+### Pins drawn from a template
+
+`create_pin`, `create_schedule` and each `create_pins_batch` entry take `template_id`, `template_inputs` and `template_version`, the same fields as the API. With `template_inputs`, PinBridge draws the image from the template, so `image_url` and `asset_id` stay empty. A photo input takes an image URL, `{"asset_id": …}` from `upload_asset`, or either with `focus`, `zoom` and `flip`. A dry run draws the pin and reports its size without keeping the image.
+
+The API's batch endpoint refuses `template_inputs`, so `create_pins_batch` sends template entries to `POST /v1/pins` one at a time and folds the answers back into one batch result in the original order. Image entries still go through `POST /v1/pins/batch` in one request. On `render_busy` an entry waits the `Retry-After` seconds and is sent again, twice at most, with the same idempotency key. No entry starts after 45 seconds, or when the slowest draw so far would end past that, so a call stays under a minute; the rest come back with `status: "not_sent"` and are counted in `not_sent_count`. Send those again with the same idempotency keys. A replay returns `existing`, judged by the pin's age against the API's `Date` header. Template entries don't need bulk imports, the same as calling `create_pin` per pin.
+
+A workspace without pin templates gets `templates_not_available` from every template tool.
 
 ### Pins deleted on Pinterest
 
