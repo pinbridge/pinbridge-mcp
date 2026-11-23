@@ -1364,11 +1364,12 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         Returns created_count, existing_count, failed_count, results (one
         {index, idempotency_key, status, pin, error} per entry) and headroom.
         With template entries it also returns not_sent_count: entries the call
-        had no time left for, with status not_sent; send them again with the
-        same idempotency keys. Fails as a whole with payment_required without
-        bulk_imports and quota_exceeded when quota is short; per-entry board,
-        validation or template failures (template_inputs_invalid, render_busy
-        after two waits) land in results instead.
+        had no time left for, or that waited while every renderer was busy,
+        with status not_sent; send them again with the same idempotency keys,
+        after the error's retry_after_seconds when it has one. Fails as a whole
+        with payment_required without bulk_imports and quota_exceeded when
+        quota is short; per-entry board, validation or template failures
+        (template_inputs_invalid) land in results instead.
         """
         return await guarded(
             lambda: service.create_pins_batch(

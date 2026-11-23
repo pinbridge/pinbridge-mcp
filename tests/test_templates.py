@@ -322,13 +322,29 @@ def test_batch_waits_out_render_busy(service: PinBridgeService, monkeypatch) -> 
     monkeypatch.setattr(service_module, "_sleep", fake_sleep)
     busy = _api_error(503, "Every renderer is busy.", "render_busy", **{"Retry-After": "3"})
     _TemplateClient.script = [busy, None, busy, busy, busy]
-    answer = asyncio.run(service.create_pins_batch([_drawn("D0"), _drawn("D1")]))
+    answer = asyncio.run(service.create_pins_batch([_drawn("D0"), _drawn("D1"), _drawn("D2")]))
+    # D0 is drawn after one wait. D1 stays busy after two waits, so neither it nor D2 is
+    # sent again: both come back not_sent with the API's Retry-After.
     assert waits == [3, 3, 3]
-    assert [r["status"] for r in answer["results"]] == ["created", "failed"]
-    assert answer["results"][1]["error"]["code"] == "render_busy"
+    assert [r["status"] for r in answer["results"]] == ["created", "not_sent", "not_sent"]
+    assert answer["results"][1]["error"]["retry_after_seconds"] == 3
+    assert "Wait 3 seconds" in answer["results"][2]["error"]["remediation"]
     keys = [r["json"]["idempotency_key"] for r in _requests() if r["path"] == "/v1/pins"]
     # Every attempt for an entry reuses its key, so a retry never duplicates the pin.
-    assert len(set(keys[:2])) == 1 and len(set(keys[2:])) == 1
+    assert len(keys) == 5 and len(set(keys[:2])) == 1 and len(set(keys[2:])) == 1
+
+
+def test_batch_does_not_wait_past_its_budget(service: PinBridgeService, monkeypatch) -> None:
+    async def no_sleep(seconds: float) -> None:
+        raise AssertionError("must not wait")
+
+    monkeypatch.setattr(service_module, "_sleep", no_sleep)
+    busy = _api_error(503, "Every renderer is busy.", "render_busy", **{"Retry-After": "50"})
+    _TemplateClient.script = [busy]
+    answer = asyncio.run(service.create_pins_batch([_drawn("D0"), _drawn("D1")]))
+    assert [r["status"] for r in answer["results"]] == ["not_sent", "not_sent"]
+    assert answer["results"][0]["error"]["retry_after_seconds"] == 50
+    assert len([r for r in _requests() if r["path"] == "/v1/pins"]) == 1
 
 
 def test_batch_marks_entries_past_the_time_budget_not_sent(

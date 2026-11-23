@@ -44,10 +44,10 @@ _TEMPLATE_DRAW_TIMEOUT_SECONDS = 90.0
 # create_pins_batch draws template entries one at a time, a few seconds each. It starts no
 # new entry after this long, so the whole call stays inside an AI client's tool timeout.
 _BATCH_DRAW_BUDGET_SECONDS = 45.0
-# A template entry answered 503 render_busy is sent again this many times, after the
-# Retry-After the API gives (1 to 60 s, capped here).
+# A template entry answered 503 render_busy is sent again this many times, each after the
+# Retry-After the API gives (1 to 60 s).
 _RENDER_BUSY_RETRIES = 2
-_RENDER_BUSY_MAX_WAIT_SECONDS = 10
+_RENDER_BUSY_MAX_WAIT_SECONDS = 60
 # Indirections so tests can drive the batch's clock and waits.
 _clock = time.monotonic
 _sleep = asyncio.sleep
@@ -774,14 +774,21 @@ class PinBridgeService:
 
         # No entry starts once the slowest draw so far would no longer fit in the budget,
         # so one call stays well under the minute MCP clients tend to wait for a tool.
+        # While the renderers are busy (render_busy), nothing is sent before the API's
+        # Retry-After has passed; when that wait does not fit, the rest is left unsent.
         deadline = _clock() + _BATCH_DRAW_BUDGET_SECONDS
         slowest = 0.0
+        busy_for: int | None = None
         for index in drawn:
             begun = _clock()
-            if begun + slowest >= deadline:
-                results[index] = self._not_sent(index, entries[index])
+            if busy_for is not None or begun + slowest >= deadline:
+                results[index] = self._not_sent(index, entries[index], busy_for=busy_for)
                 continue
-            results[index] = await self._create_drawn_pin(index, entries[index], deadline)
+            result, busy_for = await self._create_drawn_pin(index, entries[index], deadline)
+            if result is None:
+                results[index] = self._not_sent(index, entries[index], busy_for=busy_for)
+                continue
+            results[index] = result
             slowest = max(slowest, _clock() - begun)
 
         ordered = [results[index] for index in range(len(entries)) if index in results]
@@ -799,8 +806,12 @@ class PinBridgeService:
 
     async def _create_drawn_pin(
         self, index: int, entry: dict[str, Any], deadline: float
-    ) -> dict[str, Any]:
-        """Create one template-drawn pin of a batch, sending it again after render_busy."""
+    ) -> tuple[dict[str, Any] | None, int | None]:
+        """Create one template-drawn pin of a batch, waiting out render_busy.
+
+        Returns the entry's result, or ``(None, seconds)`` when the renderers stayed busy
+        and the next try may come only after ``seconds``: the caller leaves it unsent.
+        """
         key = entry["idempotency_key"]
         for attempt in range(_RENDER_BUSY_RETRIES + 1):
             started = time.monotonic()
@@ -809,21 +820,19 @@ class PinBridgeService:
                     response = await client.request("POST", "/v1/pins", json=entry)
             except APIError as exc:
                 error = _entry_error(exc)
+                if error.get("code") != "render_busy":
+                    return {
+                        "index": index,
+                        "idempotency_key": key,
+                        "status": "failed",
+                        "pin": None,
+                        "error": error,
+                    }, None
                 wait = _retry_after_seconds(exc)
-                if (
-                    error.get("code") == "render_busy"
-                    and attempt < _RENDER_BUSY_RETRIES
-                    and _clock() + wait < deadline
-                ):
-                    await _sleep(wait)
-                    continue
-                return {
-                    "index": index,
-                    "idempotency_key": key,
-                    "status": "failed",
-                    "pin": None,
-                    "error": error,
-                }
+                if attempt == _RENDER_BUSY_RETRIES or _clock() + wait >= deadline:
+                    return None, wait
+                await _sleep(wait)
+                continue
             pin = response.json()
             sent_at = _sent_at(response, time.monotonic() - started)
             return {
@@ -832,17 +841,13 @@ class PinBridgeService:
                 "status": "existing" if _created_before(pin, sent_at) else "created",
                 "pin": pin,
                 "error": None,
-            }
+            }, None
         raise AssertionError("unreachable")  # pragma: no cover
 
     @staticmethod
-    def _not_sent(index: int, entry: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "index": index,
-            "idempotency_key": entry["idempotency_key"],
-            "status": "not_sent",
-            "pin": None,
-            "error": {
+    def _not_sent(index: int, entry: dict[str, Any], *, busy_for: int | None) -> dict[str, Any]:
+        if busy_for is None:
+            error = {
                 "code": "not_sent",
                 "message": (
                     "Not sent: pins drawn from a template take a few seconds each, and this "
@@ -852,7 +857,23 @@ class PinBridgeService:
                     "Send the not_sent entries again in a new create_pins_batch call with "
                     "the same idempotency keys."
                 ),
-            },
+            }
+        else:
+            error = {
+                "code": "not_sent",
+                "message": "Not sent: every renderer is busy drawing other pins.",
+                "remediation": (
+                    f"Wait {busy_for} seconds, then send the not_sent entries again in a new "
+                    "create_pins_batch call with the same idempotency keys."
+                ),
+                "retry_after_seconds": busy_for,
+            }
+        return {
+            "index": index,
+            "idempotency_key": entry["idempotency_key"],
+            "status": "not_sent",
+            "pin": None,
+            "error": error,
         }
 
     async def update_pin(
