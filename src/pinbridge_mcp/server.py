@@ -27,6 +27,19 @@ AI_DISCLOSURES_HELP = (
     "the user made the media with AI or asks for the label."
 )
 
+TEMPLATE_ID_HELP = (
+    "UUID of a pin template from list_templates, the workspace's own or one from the "
+    "gallery. With template_inputs, PinBridge draws the pin image from it at the template's "
+    "size, so leave image_url and asset_id out."
+)
+TEMPLATE_INPUTS_HELP = (
+    "Values for the template's inputs, by input name from get_template. Text as a string, "
+    'a number as a number, a color as a hex string such as "#D81E2F". A photo input takes an '
+    'image URL, {"src": url, "focus": [x, y], "zoom": 1 to 3, "flip": true}, or '
+    '{"asset_id": id} from upload_asset with the same options.'
+)
+TEMPLATE_VERSION_HELP = "Version of template_id to draw with. Default: its current version."
+
 
 class PinInput(BaseModel):
     """One entry of create_pins_batch; the same fields as create_pin."""
@@ -35,11 +48,16 @@ class PinInput(BaseModel):
     board_id: str = Field(description="ID of the board to pin to.")
     title: str = Field(description="Pin title (<= 100 characters).", max_length=100)
     image_url: str | None = Field(
-        default=None, description="Public URL of the pin image (or use asset_id)."
+        default=None,
+        description="Public URL of the pin image (or use asset_id, or a template).",
     )
     asset_id: str | None = Field(
-        default=None, description="UUID of an uploaded PinBridge asset (or use image_url)."
+        default=None,
+        description="UUID of an uploaded PinBridge asset (or use image_url, or a template).",
     )
+    template_id: str | None = Field(default=None, description=TEMPLATE_ID_HELP)
+    template_inputs: dict[str, Any] | None = Field(default=None, description=TEMPLATE_INPUTS_HELP)
+    template_version: int | None = Field(default=None, description=TEMPLATE_VERSION_HELP, ge=1)
     description: str | None = Field(
         default=None, description="Pin description (<= 800 characters).", max_length=800
     )
@@ -205,6 +223,24 @@ class ScheduleListPage(BaseModel):
     has_more: PageHasMore
 
 
+class TemplateListPage(BaseModel):
+    """One page of list_templates results plus the total number of matching templates."""
+
+    items: list[dict[str, Any]] = Field(
+        description=(
+            "Templates on this page, each with id (the template_id), name, description, "
+            "niches, tags, source (workspace: this workspace's own; gallery: shared by "
+            "another workspace and approved by PinBridge), version, visibility, maker, "
+            "review (own templates only), pins_count, copies_count, uses_uploads and "
+            "updated_at. Empty when nothing matches."
+        )
+    )
+    total: PageTotal
+    limit: PageLimit
+    offset: PageOffset
+    has_more: PageHasMore
+
+
 StartDate = Annotated[
     str | None, Field(description="Inclusive start, YYYY-MM-DD. Default: 30 days ago.")
 ]
@@ -307,6 +343,17 @@ NewAiDisclosures = Annotated[
     list[AiDisclosureLabel] | None,
     Field(description=f"{AI_DISCLOSURES_HELP} Replaces the current labels; [] removes them."),
 ]
+TemplateId = Annotated[str, Field(description="UUID of the template, from list_templates.")]
+OptionalTemplateId = Annotated[str | None, Field(description=TEMPLATE_ID_HELP)]
+TemplateInputs = Annotated[dict[str, Any] | None, Field(description=TEMPLATE_INPUTS_HELP)]
+TemplateVersion = Annotated[int | None, Field(description=TEMPLATE_VERSION_HELP, ge=1)]
+TemplateSort = Literal["updated", "pins", "copies", "name"]
+# The niche slugs the API knows (GET /v1/templates/niches), as of API 1.95.
+TEMPLATE_NICHES = (
+    "general, nails, hair, makeup, womens_fashion, food, art, quotes, diy, weddings, events, "
+    "entertainment, home_decor, mens_fashion, gardening, design, travel, animals, parenting, "
+    "health, sport"
+)
 WebhookEvents = Annotated[
     list[str] | None,
     Field(description='Event names to deliver; any of "pin.published", "pin.failed".'),
@@ -353,13 +400,15 @@ Order of calls:
 3. If the image is not at a public URL, call upload_asset and pass its asset_id.
 4. create_pin publishes now and create_schedule publishes later. Pass dry_run=true
    first to validate without publishing.
-The publish_pin prompt has the full sequence.
+The publish_pin prompt has the full sequence. For a pin drawn from a template:
+list_templates, then get_template for its inputs; pass template_id and
+template_inputs instead of an image.
 
 No account connected: when list_pinterest_accounts returns no items, or a call
 fails with pinterest_not_connected, nothing can be published yet. Give the user
 the connect_url from the result, then call list_pinterest_accounts again once
-they have connected an account. Connecting and disconnecting accounts is
-dashboard-only; there is no tool for it.
+they have connected an account. Connecting accounts is dashboard-only; there
+is no tool for it.
 
 Changing things:
 - update_pin works only before a pin publishes. A published pin cannot be
@@ -369,8 +418,8 @@ Changing things:
 
 Limits and errors:
 - Every failure carries a stable code and a one-sentence fix. Follow the fix
-  instead of repeating the call; a dry run or check_board_access shows what is wrong.
-- rate_limited carries retry_after_seconds. Use create_schedule to spread pins out.
+  instead of repeating the call; a dry run or check_board_access shows why.
+- rate_limited carries retry_after_seconds; spread pins out with create_schedule.
 - A workspace has publishing and request limits. A call past one fails with a
   message naming the limit and when it resets. Tell the user and do not retry.
 - token_expired, token_revoked and scope_missing mean the Pinterest account must
@@ -392,10 +441,14 @@ PUBLISH_PIN_STEPS = """Publish one pin with PinBridge, in this order:
 3. If the board was not used recently or a previous publish to it failed, call
    check_board_access(account_id, board_id) and follow its remediation instead of
    retrying; otherwise the dry run in step 6 covers this check.
-4. Media: if the image is a public URL, pass it as image_url. If you generated the
-   image or it is not publicly fetchable, call upload_asset (file for an image
-   in the conversation, else content_base64 or source_url) and use the returned
-   id as asset_id.
+4. Media: if the pin should be drawn from a template, find it with
+   list_templates, read its inputs with get_template, ask the user for any
+   required value that is missing, and pass template_id and template_inputs
+   (a photo input takes an image URL or an asset_id from upload_asset) instead
+   of an image. Otherwise, if the image is a public URL, pass it as image_url.
+   If you generated the image or it is not publicly fetchable, call
+   upload_asset (file for an image in the conversation, else content_base64
+   or source_url) and use the returned id as asset_id.
 5. Draft title (<=100 chars), description (<=800 chars, use list_related_terms for
    keywords), link_url and alt_text. If the user made the image or video with AI,
    set ai_disclosures.
@@ -1007,6 +1060,114 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         """
         return await guarded(lambda: service.get_schedule(schedule_id))
 
+    @tool(READ, "List pin templates")
+    async def list_templates(
+        source: Annotated[
+            Literal["workspace", "gallery"] | None,
+            Field(
+                description=(
+                    "workspace: only this workspace's own templates. gallery: only the "
+                    "gallery, templates other workspaces shared and PinBridge approved. "
+                    "Default: both."
+                )
+            ),
+        ] = None,
+        niche: Annotated[
+            list[str] | None,
+            Field(
+                description=(
+                    f"Only templates in any of these niches. Slugs: {TEMPLATE_NICHES}. "
+                    "general finds the templates in General only."
+                ),
+                max_length=21,
+            ),
+        ] = None,
+        q: Annotated[
+            str | None,
+            Field(
+                description="Case-insensitive text to find in the name, description or tags.",
+                max_length=200,
+            ),
+        ] = None,
+        sort: Annotated[
+            TemplateSort,
+            Field(
+                description=(
+                    "updated: newest first; pins or copies: most used first; name: A to Z."
+                )
+            ),
+        ] = "updated",
+        limit: Limit = 20,
+        offset: Offset = 0,
+    ) -> TemplateListPage:
+        """List the pin templates this workspace can draw pins from: its own and the gallery.
+
+        Use to find a template_id when the user wants pins made from a template,
+        by name with q or by niche. Then call get_template for the inputs each
+        pin takes, and pass template_id and template_inputs to create_pin,
+        create_schedule or create_pins_batch. Templates are designed in the
+        PinBridge dashboard; there is no tool to create or edit one.
+
+        Returns one page: {items, total, limit, offset, has_more}. items carry
+        id (the template_id), name, description, niches, tags, source
+        (workspace or gallery), version, visibility, maker, review (own
+        templates only), pins_count, copies_count, uses_uploads and updated_at.
+        To read further, repeat the call with offset = offset + limit while
+        has_more is true. Fails with templates_not_available when pin templates
+        are not turned on for this workspace, and validation_error for an
+        unknown sort.
+        """
+        page = await guarded(
+            lambda: service.list_templates(
+                source=source, niche=niche, q=q, sort=sort, limit=limit, offset=offset
+            )
+        )
+        return TemplateListPage.model_validate(page)
+
+    @tool(READ, "Get pin template")
+    async def get_template(
+        template_id: TemplateId,
+        gallery: Annotated[
+            bool,
+            Field(
+                description=(
+                    "true reads the gallery listing as PinBridge approved it, even for the "
+                    "workspace's own template."
+                )
+            ),
+        ] = False,
+        detail: Annotated[
+            Literal["inputs", "full"],
+            Field(
+                description=(
+                    "inputs (default): the size, inputs and sample values a pin needs. "
+                    "full also returns the whole template definition, which is large."
+                )
+            ),
+        ] = "inputs",
+    ) -> dict:
+        """Read one pin template: the size it draws at and the inputs each pin takes.
+
+        Use after list_templates and before create_pin, create_schedule or
+        create_pins_batch with template_inputs. Each input is a text, photo
+        (type image), color or number value; ask the user for every required
+        one that is missing, such as the pin's title text and its photo.
+
+        Returns id, name, description, niches, tags, source, version (pass it as
+        template_version to keep pins on this version), visibility, maker, size
+        {width, height}, inputs (name: type, label, required, min_length and
+        max_length for text, min and max for numbers, default) and
+        sample_inputs, the values the template's preview uses. Photo samples
+        are names of PinBridge sample photos: send the user's own photo URL or
+        asset_id instead. Fails with not_found for an unknown id or another
+        workspace's template that is not in the gallery, and
+        templates_not_available when pin templates are not turned on for this
+        workspace.
+        """
+        return await guarded(
+            lambda: service.get_template(template_id, gallery=gallery, detail=detail)
+        )
+
     if not settings.enable_write_tools:
         return mcp
 
@@ -1133,19 +1294,29 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
             ),
         ] = None,
         dry_run: DryRun = False,
+        template_id: OptionalTemplateId = None,
+        template_inputs: TemplateInputs = None,
+        template_version: TemplateVersion = None,
     ) -> dict:
         """Publish a pin to Pinterest now, or preflight it with dry_run=true.
 
         Use for a pin that should go out immediately; for a future time use
-        create_schedule, for many pins use create_pins_batch. Provide either
-        image_url or asset_id (from upload_asset), not both. Run dry_run first
-        and reuse resolved.idempotency_key on the real call.
+        create_schedule, for many pins use create_pins_batch. The image is one
+        of: image_url, asset_id (from upload_asset), or template_id with
+        template_inputs, which has PinBridge draw the image from a template
+        (see get_template). Run dry_run first and reuse
+        resolved.idempotency_key on the real call; with a template the dry run
+        draws the pin and reports its size, but returns no image.
 
         Returns the pin with id and status "queued" (poll get_pin), or with
         dry_run the validation result (valid, checks, resolved, headroom).
         Fails fast with board_not_found / board_not_owned / board_access_denied
         for an unpublishable board, quota_exceeded when the monthly quota is
-        spent, and validation_error for bad fields.
+        spent, and validation_error for bad fields. With a template it also
+        fails with template_inputs_invalid (each problem listed),
+        templates_not_available, and render_busy when every renderer is busy:
+        wait the seconds it gives, then call again with the same
+        idempotency_key.
         """
         return await guarded(
             lambda: service.create_pin(
@@ -1163,6 +1334,9 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
                 link_url=link_url,
                 idempotency_key=idempotency_key,
                 dry_run=dry_run,
+                template_id=template_id,
+                template_inputs=template_inputs,
+                template_version=template_version,
             )
         )
 
@@ -1175,16 +1349,22 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
     ) -> dict:
         """Publish several pins in one call with a per-entry outcome.
 
-        Use for bulk publishing (up to 100 pins) when the workspace has the
-        bulk_imports feature; otherwise call create_pin per pin. Check
-        get_billing_status for quota first: the batch needs quota for every
-        entry. Supply an idempotency_key per entry if you may resend.
+        Use for bulk publishing (up to 100 pins). Entries with image_url or
+        asset_id need the bulk_imports feature; otherwise call create_pin per
+        pin. Entries with template_id and template_inputs (see get_template)
+        are drawn and published one at a time and do not need bulk_imports;
+        each takes a few seconds, so send about 10 per call. Check
+        get_billing_status for quota first. Supply an idempotency_key per
+        entry if you may resend.
 
         Returns created_count, existing_count, failed_count, results (one
         {index, idempotency_key, status, pin, error} per entry) and headroom.
-        Fails as a whole with payment_required without bulk_imports and
-        quota_exceeded when quota is short; per-entry board or validation
-        failures land in results instead.
+        With template entries it also returns not_sent_count: entries the call
+        had no time left for, with status not_sent; send them again with the
+        same idempotency keys. Fails as a whole with payment_required without
+        bulk_imports and quota_exceeded when quota is short; per-entry board,
+        validation or template failures (template_inputs_invalid, render_busy
+        after two waits) land in results instead.
         """
         return await guarded(
             lambda: service.create_pins_batch(
@@ -1307,19 +1487,27 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
         cover_image_url: CoverImageUrl = None,
         cover_image_asset_id: CoverImageAssetId = None,
         dry_run: DryRun = False,
+        template_id: OptionalTemplateId = None,
+        template_inputs: TemplateInputs = None,
+        template_version: TemplateVersion = None,
     ) -> dict:
         """Schedule a pin to publish at a future time.
 
         Use when the pin should go out later or when spreading many pins out
-        after rate_limited; for an immediate publish use create_pin. Provide
-        either image_url or asset_id, not both. The board is preflighted now,
-        not at run time. A repeat call creates a second schedule, so check
-        list_schedules before resending after a timeout.
+        after rate_limited; for an immediate publish use create_pin. The image
+        is one of: image_url, asset_id, or template_id with template_inputs
+        (see get_template), which has PinBridge draw it from a template now.
+        The board is preflighted now, not at run time. A repeat call creates a
+        second schedule, so check list_schedules before resending after a
+        timeout.
 
         Returns the schedule with id and status "scheduled" (track it with
         get_schedule), or with dry_run the validation result. Fails with
         validation_error for a past or timezone-less run_at, board_* codes
         for an unpublishable board, and quota_exceeded when quota is spent.
+        With a template it also fails with template_inputs_invalid,
+        templates_not_available, and render_busy when every renderer is busy
+        (wait the seconds it gives, then call again).
         """
         return await guarded(
             lambda: service.create_schedule(
@@ -1336,6 +1524,9 @@ def create_mcp_server(settings: Settings | None = None) -> FastMCP:
                 cover_image_url=cover_image_url,
                 cover_image_asset_id=cover_image_asset_id,
                 dry_run=dry_run,
+                template_id=template_id,
+                template_inputs=template_inputs,
+                template_version=template_version,
             )
         )
 

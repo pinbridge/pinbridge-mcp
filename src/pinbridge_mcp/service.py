@@ -13,16 +13,17 @@ import base64
 import binascii
 import ipaddress
 import socket
+import time
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urljoin, urlparse
 from uuid import uuid4
 
 import httpx
 from pinbridge_sdk import AsyncPinbridgeClient
-from pinbridge_sdk.errors import APIError, AuthenticationError, PinbridgeError
+from pinbridge_sdk.errors import APIError, AuthenticationError, NotFoundError, PinbridgeError
 
 from . import __version__
 from .auth import get_current_api_key
@@ -36,6 +37,20 @@ _FETCH_CHUNK_BYTES = 1024 * 1024
 _FILE_URL_MAX_REDIRECTS = 3
 # What agents put in content_base64 when they hold a file instead of its bytes.
 _PATH_PREFIXES = ("/", "./", "~/", "file:", "sandbox:")
+# A pin drawn from a template waits on the API's render budget (60 s, the wait for a free
+# renderer included) plus photo downloads, which is longer than the SDK's 30 s default.
+_TEMPLATE_DRAW_TIMEOUT_SECONDS = 90.0
+# create_pins_batch draws template entries one at a time, a few seconds each. It starts no
+# new entry after this long, so the whole call stays inside an AI client's tool timeout.
+_BATCH_DRAW_BUDGET_SECONDS = 45.0
+# A template entry answered 503 render_busy is sent again this many times, after the
+# Retry-After the API gives (1 to 60 s, capped here).
+_RENDER_BUSY_RETRIES = 2
+_RENDER_BUSY_MAX_WAIT_SECONDS = 10
+TEMPLATES_NOT_AVAILABLE = (
+    "PinBridge API error (404) [templates_not_available]: Pin templates are not turned on "
+    "for this workspace yet. Fix: make the pin from an image instead (image_url or asset_id)."
+)
 
 
 def _parse_iso_datetime(value: str, field: str = "timestamp") -> datetime:
@@ -195,6 +210,113 @@ def _summarize_pin(pin: Any) -> Any:
     return {field: pin.get(field) for field in PIN_SUMMARY_FIELDS}
 
 
+# The fields list_templates returns. The API's list also carries the deprecated niche,
+# the template's own key and bookkeeping the assistant does not need.
+TEMPLATE_SUMMARY_FIELDS: tuple[str, ...] = (
+    "id",
+    "name",
+    "description",
+    "niches",
+    "tags",
+    "source",
+    "version",
+    "visibility",
+    "maker",
+    "review",
+    "pins_count",
+    "copies_count",
+    "uses_uploads",
+    "updated_at",
+)
+# What an input of a template's definition may say about the values it takes.
+_INPUT_FIELDS: tuple[str, ...] = (
+    "type",
+    "label",
+    "required",
+    "min_length",
+    "max_length",
+    "min",
+    "max",
+    "default",
+)
+
+
+def _summarize_template(template: Any) -> Any:
+    if not isinstance(template, Mapping):
+        return template
+    return {field: template.get(field) for field in TEMPLATE_SUMMARY_FIELDS}
+
+
+def _template_view(template: Any, *, detail: str) -> Any:
+    """One template as an assistant needs it: its size and the inputs a pin takes."""
+    if not isinstance(template, Mapping):
+        return template
+    definition = template.get("definition")
+    definition = definition if isinstance(definition, Mapping) else {}
+    canvas = definition.get("canvas")
+    canvas = canvas if isinstance(canvas, Mapping) else {}
+    raw_inputs = definition.get("inputs")
+    inputs = {
+        name: {key: spec[key] for key in _INPUT_FIELDS if key in spec}
+        for name, spec in (raw_inputs.items() if isinstance(raw_inputs, Mapping) else ())
+        if isinstance(spec, Mapping)
+    }
+    view = {
+        **_summarize_template(template),
+        "size": {"width": canvas.get("width"), "height": canvas.get("height")},
+        "inputs": inputs,
+        "sample_inputs": template.get("sample_inputs") or {},
+    }
+    if detail == "full":
+        view["definition"] = dict(definition)
+    return view
+
+
+def _templates_not_available(exc: NotFoundError) -> bool:
+    """A template route answering a bare 404 means the workspace has no pin templates.
+
+    The API answers 404 "Not Found" from its feature gate, and "Template not found" for
+    an id the workspace cannot see.
+    """
+    return exc.message.strip().lower() == "not found"
+
+
+def _retry_after_seconds(exc: APIError) -> int:
+    response = getattr(exc, "response", None)
+    raw = response.headers.get("retry-after", "") if response is not None else ""
+    try:
+        seconds = int(raw)
+    except (TypeError, ValueError):
+        seconds = 5
+    return min(_RENDER_BUSY_MAX_WAIT_SECONDS, max(1, seconds))
+
+
+def _entry_error(exc: Exception) -> dict[str, Any]:
+    """A per-entry error in the shape the API's batch uses: the error envelope."""
+    if isinstance(exc, APIError):
+        envelope = _error_envelope(exc.details)
+        return {
+            **envelope,
+            "code": envelope.get("code") or exc.code,
+            "message": envelope.get("message") or exc.message,
+            "status_code": exc.status_code,
+        }
+    return {"code": "error", "message": str(exc)}
+
+
+def _created_before(pin: Any, started: datetime) -> bool:
+    """True when the API returned a pin made before this call: an idempotency-key hit."""
+    if not isinstance(pin, Mapping) or not isinstance(pin.get("created_at"), str):
+        return False
+    try:
+        created = _parse_iso_datetime(pin["created_at"])
+    except ValueError:
+        return False
+    if created.tzinfo is None:
+        return False
+    return created < started - timedelta(seconds=5)
+
+
 def _page(response: Any, *, limit: int, offset: int) -> dict[str, Any]:
     """Wrap a list response with the API's ``X-Total-Count`` so callers can page.
 
@@ -243,11 +365,13 @@ class PinBridgeService:
         return api_key
 
     @asynccontextmanager
-    async def client(self) -> Any:
+    async def client(self, *, timeout: float | None = None) -> Any:
+        options: dict[str, Any] = {"timeout": timeout} if timeout is not None else {}
         client = self._client_factory(
             base_url=self.settings.pinbridge_base_url,
             api_key=self.resolve_api_key(),
             user_agent=f"pinbridge-mcp/{__version__}",
+            **options,
         )
         try:
             yield client
@@ -386,6 +510,57 @@ class PinBridgeService:
             outcome = await client.assets.delete(asset_id, confirm=confirm)
         return {"asset_id": asset_id, **_dump(outcome)}
 
+    # ------------------------------------------------------------------ templates
+
+    async def list_templates(
+        self,
+        *,
+        source: str | None = None,
+        niche: list[str] | None = None,
+        q: str | None = None,
+        sort: str = "updated",
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        params = _clean(
+            {
+                "source": source,
+                "niche": [slug for slug in niche or [] if slug.strip()] or None,
+                "q": q,
+                "sort": sort,
+                "limit": limit,
+                "offset": offset,
+            }
+        )
+        try:
+            async with self.client() as client:
+                response = await client.request("GET", "/v1/templates", params=params)
+        except NotFoundError as exc:
+            if _templates_not_available(exc):
+                raise ValueError(TEMPLATES_NOT_AVAILABLE) from exc
+            raise
+        page = _page(response, limit=limit, offset=offset)
+        page["items"] = [_summarize_template(item) for item in page["items"]]
+        return page
+
+    async def get_template(
+        self, template_id: str, *, gallery: bool = False, detail: str = "inputs"
+    ) -> dict[str, Any]:
+        params = {"gallery": "true"} if gallery else None
+        try:
+            async with self.client() as client:
+                response = await client.request(
+                    "GET",
+                    "/v1/templates/{template_id}",
+                    path_params={"template_id": template_id},
+                    params=params,
+                )
+        except NotFoundError as exc:
+            if _templates_not_available(exc):
+                raise ValueError(TEMPLATES_NOT_AVAILABLE) from exc
+            raise
+        return _template_view(response.json(), detail=detail)
+
     # ------------------------------------------------------------------ pins
 
     async def list_pins(
@@ -449,6 +624,9 @@ class PinBridgeService:
         link_url: str | None,
         idempotency_key: str | None,
         ai_disclosures: list[str] | None = None,
+        template_id: str | None = None,
+        template_version: int | None = None,
+        template_inputs: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         return _clean(
             {
@@ -464,12 +642,22 @@ class PinBridgeService:
                 "link_url": link_url,
                 "image_url": image_url,
                 "asset_id": asset_id,
+                "template_id": template_id,
+                "template_version": template_version,
+                "template_inputs": dict(template_inputs) if template_inputs is not None else None,
                 "idempotency_key": idempotency_key or uuid4().hex,
             }
         )
 
+    @staticmethod
+    def _draw_timeout(payload: Mapping[str, Any]) -> float | None:
+        """A longer HTTP timeout when the API draws the image from a template."""
+        if payload.get("template_inputs") is None:
+            return None
+        return _TEMPLATE_DRAW_TIMEOUT_SECONDS
+
     async def validate_pin(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        async with self.client() as client:
+        async with self.client(timeout=self._draw_timeout(payload)) as client:
             response = await client.request("POST", "/v1/pins/validate", json=dict(payload))
         return response.json()
 
@@ -490,6 +678,9 @@ class PinBridgeService:
         idempotency_key: str | None = None,
         dry_run: bool = False,
         ai_disclosures: list[str] | None = None,
+        template_id: str | None = None,
+        template_version: int | None = None,
+        template_inputs: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = self._pin_payload(
             account_id=account_id,
@@ -505,16 +696,26 @@ class PinBridgeService:
             link_url=link_url,
             idempotency_key=idempotency_key,
             ai_disclosures=ai_disclosures,
+            template_id=template_id,
+            template_version=template_version,
+            template_inputs=template_inputs,
         )
         if dry_run:
             return await self.validate_pin(payload)
         # Raw JSON rather than the SDK model, which drops fields newer than the SDK
-        # (ai_disclosures, DEV-913).
-        async with self.client() as client:
+        # (ai_disclosures, DEV-913; template_id and template_version, DEV-718).
+        async with self.client(timeout=self._draw_timeout(payload)) as client:
             response = await client.request("POST", "/v1/pins", json=payload)
         return response.json()
 
     async def create_pins_batch(self, pins: list[Mapping[str, Any]]) -> dict[str, Any]:
+        """Publish several pins; entries drawn from a template go one at a time.
+
+        The API's batch endpoint refuses ``template_inputs`` (a draw takes seconds), so
+        those entries are sent to ``POST /v1/pins`` one after the other, waiting out
+        ``render_busy``, and folded back into the batch's answer in their original order.
+        Entries not reached within the time budget come back as ``not_sent``.
+        """
         if not pins:
             raise ValueError("pins must contain at least one entry")
         entries: list[dict[str, Any]] = []
@@ -525,9 +726,100 @@ class PinBridgeService:
                     raise ValueError(f"pins[{index}] is missing required field '{required}'")
             entry.setdefault("idempotency_key", uuid4().hex)
             entries.append(entry)
-        async with self.client() as client:
-            response = await client.request("POST", "/v1/pins/batch", json={"pins": entries})
-        return response.json()
+        drawn = [index for index, entry in enumerate(entries) if "template_inputs" in entry]
+        plain = [index for index, entry in enumerate(entries) if "template_inputs" not in entry]
+
+        results: dict[int, dict[str, Any]] = {}
+        headroom: Any = None
+        if plain:
+            async with self.client() as client:
+                response = await client.request(
+                    "POST", "/v1/pins/batch", json={"pins": [entries[i] for i in plain]}
+                )
+            answer = response.json()
+            if not drawn:
+                return answer
+            headroom = answer.get("headroom")
+            for result in answer.get("results") or []:
+                original = plain[result["index"]]
+                results[original] = {**result, "index": original}
+
+        deadline = time.monotonic() + _BATCH_DRAW_BUDGET_SECONDS
+        for index in drawn:
+            if time.monotonic() >= deadline:
+                results[index] = self._not_sent(index, entries[index])
+                continue
+            results[index] = await self._create_drawn_pin(index, entries[index], deadline)
+
+        ordered = [results[index] for index in range(len(entries)) if index in results]
+        counts = {status: 0 for status in ("created", "existing", "failed", "not_sent")}
+        for result in ordered:
+            counts[result["status"]] = counts.get(result["status"], 0) + 1
+        return {
+            "created_count": counts["created"],
+            "existing_count": counts["existing"],
+            "failed_count": counts["failed"],
+            "not_sent_count": counts["not_sent"],
+            "results": ordered,
+            "headroom": headroom,
+        }
+
+    async def _create_drawn_pin(
+        self, index: int, entry: dict[str, Any], deadline: float
+    ) -> dict[str, Any]:
+        """Create one template-drawn pin of a batch, sending it again after render_busy."""
+        key = entry["idempotency_key"]
+        for attempt in range(_RENDER_BUSY_RETRIES + 1):
+            started = datetime.now().astimezone()
+            try:
+                async with self.client(timeout=_TEMPLATE_DRAW_TIMEOUT_SECONDS) as client:
+                    response = await client.request("POST", "/v1/pins", json=entry)
+            except APIError as exc:
+                error = _entry_error(exc)
+                wait = _retry_after_seconds(exc)
+                if (
+                    error.get("code") == "render_busy"
+                    and attempt < _RENDER_BUSY_RETRIES
+                    and time.monotonic() + wait < deadline
+                ):
+                    await asyncio.sleep(wait)
+                    continue
+                return {
+                    "index": index,
+                    "idempotency_key": key,
+                    "status": "failed",
+                    "pin": None,
+                    "error": error,
+                }
+            pin = response.json()
+            return {
+                "index": index,
+                "idempotency_key": key,
+                "status": "existing" if _created_before(pin, started) else "created",
+                "pin": pin,
+                "error": None,
+            }
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    @staticmethod
+    def _not_sent(index: int, entry: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "index": index,
+            "idempotency_key": entry["idempotency_key"],
+            "status": "not_sent",
+            "pin": None,
+            "error": {
+                "code": "not_sent",
+                "message": (
+                    "Not sent: pins drawn from a template take a few seconds each, and this "
+                    "call ran out of time before reaching this one."
+                ),
+                "remediation": (
+                    "Send the not_sent entries again in a new create_pins_batch call with "
+                    "the same idempotency keys."
+                ),
+            },
+        }
 
     async def update_pin(
         self,
@@ -770,6 +1062,9 @@ class PinBridgeService:
         cover_image_url: str | None,
         cover_image_asset_id: str | None,
         ai_disclosures: list[str] | None = None,
+        template_id: str | None = None,
+        template_version: int | None = None,
+        template_inputs: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         return _clean(
             {
@@ -785,11 +1080,14 @@ class PinBridgeService:
                 "link_url": link_url,
                 "cover_image_url": cover_image_url,
                 "cover_image_asset_id": cover_image_asset_id,
+                "template_id": template_id,
+                "template_version": template_version,
+                "template_inputs": dict(template_inputs) if template_inputs is not None else None,
             }
         )
 
     async def validate_schedule(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        async with self.client() as client:
+        async with self.client(timeout=self._draw_timeout(payload)) as client:
             response = await client.request("POST", "/v1/schedules/validate", json=dict(payload))
         return response.json()
 
@@ -809,6 +1107,9 @@ class PinBridgeService:
         cover_image_asset_id: str | None = None,
         dry_run: bool = False,
         ai_disclosures: list[str] | None = None,
+        template_id: str | None = None,
+        template_version: int | None = None,
+        template_inputs: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = self._schedule_payload(
             account_id=account_id,
@@ -823,12 +1124,16 @@ class PinBridgeService:
             cover_image_url=cover_image_url,
             cover_image_asset_id=cover_image_asset_id,
             ai_disclosures=ai_disclosures,
+            template_id=template_id,
+            template_version=template_version,
+            template_inputs=template_inputs,
         )
         if dry_run:
             return await self.validate_schedule(payload)
-        async with self.client() as client:
-            schedule = await client.schedules.create(payload)
-        return _dump(schedule)
+        # Raw JSON rather than the SDK model, which drops template_id and template_version.
+        async with self.client(timeout=self._draw_timeout(payload)) as client:
+            response = await client.request("POST", "/v1/schedules", json=payload)
+        return response.json()
 
     async def list_schedules(
         self,

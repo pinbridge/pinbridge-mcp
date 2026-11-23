@@ -30,6 +30,8 @@ READ_ONLY_TOOLS = {
     "get_rate_meter",
     "list_schedules",
     "get_schedule",
+    "list_templates",
+    "get_template",
 }
 WRITE_TOOLS = {
     "upload_asset",

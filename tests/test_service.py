@@ -201,6 +201,8 @@ class _FakeClient:
             )
         if path == "/v1/schedules/validate":
             return _FakeResponse({"valid": False, "dry_run": True, "checks": [{"name": "run_at"}]})
+        if path == "/v1/schedules" and method == "POST":
+            return _FakeResponse({"id": "sched_new", "status": "scheduled", **kwargs["json"]})
         if path == "/v1/pins" and method == "POST":
             return _FakeResponse({"id": "pin_new", "status": "queued", **kwargs["json"]})
         if path == "/v1/pins/{pin_id}" and method == "GET":
