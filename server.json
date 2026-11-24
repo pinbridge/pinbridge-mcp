@@ -11,7 +11,7 @@
       "headers": [
         {
           "name": "Authorization",
-          "description": "Optional. OAuth-capable clients (such as Claude) connect via the server's built-in OAuth flow with no header. Otherwise, pass a PinBridge API key as 'Bearer pb_<64 hex characters>' — create one in the dashboard at https://www.pinbridge.io (the free Playground plan works).",
+          "description": "Optional. OAuth-capable clients (such as Claude) connect via the server's built-in OAuth flow with no header. Otherwise, pass a PinBridge API key as 'Bearer pb_<64 hex characters>'. Create one in the dashboard at https://app.pinbridge.io (the free Playground plan works).",
           "isRequired": false,
           "isSecret": true
         }
