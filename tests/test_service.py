@@ -201,6 +201,8 @@ class _FakeClient:
             )
         if path == "/v1/schedules/validate":
             return _FakeResponse({"valid": False, "dry_run": True, "checks": [{"name": "run_at"}]})
+        if path == "/v1/schedules" and method == "POST":
+            return _FakeResponse({"id": "sched_new", "status": "scheduled", **kwargs["json"]})
         if path == "/v1/pins" and method == "POST":
             return _FakeResponse({"id": "pin_new", "status": "queued", **kwargs["json"]})
         if path == "/v1/pins/{pin_id}" and method == "GET":
@@ -1119,51 +1121,37 @@ def test_format_error_adds_a_link_the_remediation_lacks() -> None:
 
 
 def test_schedule_answer_keeps_the_api_warnings() -> None:
-    """create_schedule answers with the SDK model; its warnings must reach the client (DEV-853)."""
-    from pinbridge_sdk.models import ScheduleResponse
-
-    from pinbridge_mcp.service import _dump
-
-    api_answer = {
-        "id": "11111111-1111-1111-1111-111111111111",
-        "workspace_id": "22222222-2222-2222-2222-222222222222",
-        "pinterest_account_id": "33333333-3333-3333-3333-333333333333",
-        "run_at": "2030-01-01T10:00:00Z",
-        "status": "scheduled",
-        "payload": {"board_id": "b1", "title": "T"},
-        "created_at": "2026-11-17T10:00:00Z",
-        "updated_at": "2026-11-17T10:00:00Z",
-        "warnings": [
-            {
-                "code": "media_link_may_expire",
-                "message": "image_url is a Dropbox temporary link.",
-                "remediation": "Upload the file and set asset_id on the schedule.",
-                "field": "image_url",
-                "expires_at": "2030-01-01T09:00:00Z",
-            }
-        ],
+    """create_schedule returns the API's JSON, so its warnings reach the client (DEV-853)."""
+    warning = {
+        "code": "media_link_may_expire",
+        "message": "image_url is a Dropbox temporary link.",
+        "remediation": "Upload the file and set asset_id on the schedule.",
+        "field": "image_url",
+        "expires_at": "2030-01-01T09:00:00Z",
     }
 
-    answer = _dump(ScheduleResponse.model_validate(api_answer))
+    class _WarningClient(_FakeClient):
+        async def request(self, method: str, path: str, **kwargs) -> _FakeResponse:
+            if path == "/v1/schedules" and method == "POST":
+                self.requests.append({"method": method, "path": path, **kwargs})
+                return _FakeResponse(
+                    {"id": "sched_1", "status": "scheduled", "warnings": [warning]}
+                )
+            return await super().request(method, path, **kwargs)
 
-    assert answer["warnings"] == [
-        {
-            "code": "media_link_may_expire",
-            "message": "image_url is a Dropbox temporary link.",
-            "remediation": "Upload the file and set asset_id on the schedule.",
-            "field": "image_url",
-            "expires_at": "2030-01-01T09:00:00Z",
-            "limit_type": None,
-            "plan": None,
-            "plan_name": None,
-            "limit": None,
-            "used": None,
-            "recommended_plan": None,
-            "recommended_plan_name": None,
-            "recommended_limit": None,
-            "upgrade_url": None,
-        }
-    ]
+    service = PinBridgeService(
+        Settings(pinbridge_api_key="pb_local_key"), client_factory=_WarningClient
+    )
+    answer = asyncio.run(
+        service.create_schedule(
+            account_id="acct_1",
+            board_id="b1",
+            title="T",
+            run_at="2030-01-01T10:00:00Z",
+            image_url="https://www.dropbox.com/scl/fi/x/pin.png",
+        )
+    )
+    assert answer["warnings"] == [warning]
 
 
 def test_ai_disclosures_reach_the_api_on_every_write() -> None:

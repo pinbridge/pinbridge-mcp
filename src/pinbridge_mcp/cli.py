@@ -26,7 +26,7 @@ async def _validate_stdio_startup(settings) -> None:
 
     if settings.verify_incoming_api_keys:
         verifier = PinBridgeAPIKeyVerifier(settings)
-        is_valid, reason = await verifier.verify(settings.pinbridge_api_key)
+        is_valid, reason, _plan = await verifier.verify(settings.pinbridge_api_key)
         if not is_valid:
             print(f"Error: {reason}", file=sys.stderr)
             sys.exit(1)
